@@ -1,0 +1,17 @@
+date,symbol,setup_type,entry,stop,tp1,tp2,rr,momentum_trend,sr,csp_pa_vol,mtf,rs,rrs,board_edge,ft,mi,total_score,decision,notes
+2026-06-19,ETN,retest,405,392,418,431,2.0,1,0,0,0,1,0,1,0,1,6,watch,Best candidate; confirm S&R MTF on TV
+2026-06-19,GEV,retest,0,0,0,0,0,1,0,0,0,1,0,1,0,1,5,watch,Pullback phase; wait H4 reclaim
+2026-06-19,CAT,breakout,0,0,0,0,0,1,0,0,0,1,0,1,0,1,5,skip,Extended; chase risk RR poor
+2026-06-19,DE,retest,0,0,0,0,0,1,0,0,0,1,0,1,0,0,5,watch,Secondary to ETN
+2026-06-19,XOM,retest,0,0,0,0,0,1,0,0,0,1,0,1,0,1,5,watch,Energy secondary
+2026-06-19,NVDA,retest,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,skip,Tech rotation headwind
+2026-06-19,ETN,retest,407,398,416,425,2.0,1,0,1,0,1,0,1,1,1,6,watch,繁體中文一句總結
+2026-06-19,ETN,,0,0,0,0,0,0,0,1,0,1,0,1,1,1,5,watch,趨勢不足，需要更多的信號和支持/抗力。
+2026-06-19,ETN,retest,407,398,416,425,2.0,1,0,1,0,1,0,1,0,0,4,watch,趨勢強但而家追價，等回踩405-408企穩再考慮A級入場
+2026-06-19,ETN,retest,407,398,416,425,2.0,1,0,1,0,1,0,1,1,1,6,watch,趨勢強但而家追價，等回踩405-408企穩再考慮A級入場
+2026-06-19,WOLF,retest,407,398,416,425,2.0,0,1,0,0,1,0,1,1,0,4,skip,趨勢強但而家追價，等回踩405-408企穩再考慮A級入場
+2026-06-20,WOLF,重新测试,407,398,416,425,2.0,0,0,1,0,1,0,1,1,1,5,skip,趋势强但追价，等回测试405-408再考虑进场
+2026-06-20,WOLF,,,,,,,0,0,0,0,0,0,0,0,0,0,skip,WOLF 分析失敗：AI 讀錯價格，請重新截圖再 run。參考 reports/WOLF_checklist_正確版.md
+2026-06-20,WOLF,,,,,,,0,0,0,0,0,0,0,0,0,0,skip,WOLF 分析失敗：AI 讀錯價格，請重新截圖再 run。參考 reports/WOLF_checklist_正確版.md
+2026-06-20,WOLF,,,,,,,0,0,0,0,0,0,0,0,0,0,skip,WOLF 分析失敗：AI 讀錯價格，請重新截圖再 run。參考 reports/WOLF_checklist_正確版.md
+2026-06-20,WOLF,retest or breakout,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,skip,WOLF 評級 ，決策 。請參考各 edge 分數同 Entry Plan。

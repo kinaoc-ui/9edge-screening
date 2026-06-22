@@ -1,0 +1,58 @@
+{
+  "edges": {
+    "momentum_trend": {
+      "score": 1,
+      "note": "收盤421.77，站喺MA叢集400-405同200MA(369)之上"
+    },
+    "sr": {
+      "score": 0,
+      "note": "已從414彈起，而家421係追價，唔係近支撐入"
+    },
+    "csp_pa_vol": {
+      "score": 1,
+      "note": "波幅收縮後出+2.96%陽線，量3.72M大過均量2.48M"
+    },
+    "mtf": {
+      "score": 0,
+      "note": "只得D1圖，要H4確認"
+    },
+    "rs": {
+      "score": 1,
+      "note": "工業板塊2026領漲，跑贏SPY"
+    },
+    "rrs": {
+      "score": 0,
+      "note": "追入RR差；回踩407止損398先有RR2"
+    },
+    "board_edge": {
+      "score": 1,
+      "note": "XLI工業板塊強勢"
+    },
+    "ft": {
+      "score": 1,
+      "note": "突破後有跟進，今日陽線收高"
+    },
+    "mi": {
+      "score": 1,
+      "note": "成交量3.72M vs 均量2.48M"
+    }
+  },
+  "_parse_warning": "Ollama JSON 損壞，已改用 ETN 標準例子分數（圖表相同時可信）",
+  "symbol": "ETN",
+  "price": 421.77,
+  "change_pct": 2.96,
+  "volume": "3.72M",
+  "volume_avg": "2.48M",
+  "summary_zh": "趨勢強但而家追價，等回踩405-408企穩再考慮A級入場",
+  "entry_plan": {
+    "preferred": "retest",
+    "entry": 407,
+    "stop": 398,
+    "tp1": 416,
+    "tp2": 425,
+    "rr": 2.0
+  },
+  "total_score": 6,
+  "grade": "B",
+  "decision": "watch"
+}

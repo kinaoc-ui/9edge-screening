@@ -1,0 +1,7 @@
+# Streamlit Cloud (app_9edge_ui.py): streamlit + yfinance required
+streamlit>=1.32.0
+yfinance>=0.2.40
+# Optional — check_chart.py / AI tools (not used on Cloud UI)
+openai>=1.40.0
+pillow>=10.0.0
+requests>=2.31.0

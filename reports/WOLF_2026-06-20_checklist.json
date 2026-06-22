@@ -1,0 +1,62 @@
+{
+  "symbol": "WOLF",
+  "timeframe": "D1",
+  "price": 57.41,
+  "change_pct": 0,
+  "volume": 6805000,
+  "volume_avg": "6.80M",
+  "edges": {
+    "momentum_trend": {
+      "score": 0,
+      "note": "繁中說明+圖上數字"
+    },
+    "sr": {
+      "score": 0,
+      "note": "（AI 未詳述）S&R：未通過。標準：Entry near support, or breakout + successful retest"
+    },
+    "csp_pa_vol": {
+      "score": 0,
+      "note": "（AI 未詳述）CSP + PA + VOL：未通過。標準：Consolidation, clear trigger, volume expansion"
+    },
+    "mtf": {
+      "score": 0,
+      "note": "（AI 未詳述）MTF：未通過。標準：D1 and H4 direction aligned"
+    },
+    "rs": {
+      "score": 1,
+      "note": "3M return 236.5% vs SPY 13.8%"
+    },
+    "rrs": {
+      "score": 0,
+      "note": "（AI 未詳述）R&R&S：未通過。標準：RR >= 2 with structure-based stop"
+    },
+    "board_edge": {
+      "score": 0,
+      "note": "（AI 未詳述）Board Market Edge：未通過。標準：Leading sector/industry group"
+    },
+    "ft": {
+      "score": 0,
+      "note": "（AI 未詳述）F.T.：未通過。標準：Follow-through after trigger"
+    },
+    "mi": {
+      "score": 0,
+      "note": "（AI 未詳述）M.I.：未通過。標準：Volume/OBV/CMF participation evidence"
+    }
+  },
+  "total_score": 1,
+  "grade": "C",
+  "decision": "skip",
+  "skip_reason": null,
+  "entry_plan": {
+    "preferred": "retest or breakout",
+    "entry": 0,
+    "stop": 0,
+    "tp1": 0,
+    "tp2": 0,
+    "rr": 0
+  },
+  "summary_zh": "WOLF 評級 ，決策 。請參考各 edge 分數同 Entry Plan。",
+  "market_cap": 2983718144,
+  "_hybrid": true,
+  "_ai_warning": "有 8 項 AI 輸出唔完整，已用標準例子/備用說明補充。 改善：雙擊 加入ETN標準例子.bat 或 升級準確度.bat"
+}

@@ -1,0 +1,8 @@
+[server]
+fileWatcherType = "poll"
+
+[runner]
+fastReruns = true
+
+[client]
+toolbarMode = "minimal"

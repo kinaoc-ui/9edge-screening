@@ -1,0 +1,45 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.env
+.venv/
+venv/
+.streamlit/secrets.toml
+
+# Logs and scratch output
+*.log
+*_test.txt
+*_test_out.txt
+reports/last_ollama_raw.txt
+
+# Large local media — never push to GitHub
+video/
+charts/**/*.png
+charts/**/*.jpg
+charts/**/*.jpeg
+charts/**/*.webp
+charts/**/*.gif
+
+# Cursor IDE (local only)
+.cursor/
+
+# Archive / legacy bats (optional local)
+_archive/
+
+# Batch reports — ignore bulk local output; keep cloud-shareable summaries
+reports/batch/*
+!reports/batch/README.txt
+!reports/batch/*_summary.md
+!reports/batch/SCREENER_*
+reports/batch/tv_import/
+
+# Optional: large TV CSV exports (upload via UI on Cloud)
+charts/csv/*.csv
+!charts/csv/README.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,40 @@
+[
+  {
+    "symbol": "NVDA",
+    "total_score": 5,
+    "grade": "C",
+    "decision": "skip",
+    "directional_bias": "long",
+    "scenarios": {
+      "current_long": 5,
+      "current_short": 2,
+      "bias": "long",
+      "best_long": null
+    },
+    "_meta": {
+      "description": "NVIDIA Corporation",
+      "sector": "Electronic technology",
+      "industry": "Semiconductors",
+      "price": "204.65"
+    }
+  },
+  {
+    "symbol": "GOOG",
+    "total_score": 5,
+    "grade": "C",
+    "decision": "skip",
+    "directional_bias": "long",
+    "scenarios": {
+      "current_long": 5,
+      "current_short": 2,
+      "bias": "long",
+      "best_long": null
+    },
+    "_meta": {
+      "description": "Alphabet Inc.",
+      "sector": "Technology services",
+      "industry": "Internet software/Services",
+      "price": "362.1"
+    }
+  }
+]

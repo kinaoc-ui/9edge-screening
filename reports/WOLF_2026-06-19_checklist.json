@@ -1,0 +1,60 @@
+{
+  "symbol": "WOLF",
+  "timeframe": "D1",
+  "price": 421.77,
+  "change_pct": 2.96,
+  "volume": "3.72M",
+  "volume_avg": "2.48M",
+  "edges": {
+    "momentum_trend": {
+      "score": 0,
+      "note": "（AI 未詳述）Momentum & Trend：未通過。標準：D1 above EMA20/50, EMA20 > EMA50"
+    },
+    "sr": {
+      "score": 1,
+      "note": "已從414彈起，而家421係追價，唔係近支撐入"
+    },
+    "csp_pa_vol": {
+      "score": 0,
+      "note": "（AI 未詳述）CSP + PA + VOL：未通過。標準：Consolidation, clear trigger, volume expansion"
+    },
+    "mtf": {
+      "score": 0,
+      "note": "只得D1圖，要H4確認"
+    },
+    "rs": {
+      "score": 1,
+      "note": "工業板塊2026領漲，跑贏SPY"
+    },
+    "rrs": {
+      "score": 0,
+      "note": "追入RR差；回踩407止損398先有RR2"
+    },
+    "board_edge": {
+      "score": 1,
+      "note": "XLI工業板塊強勢"
+    },
+    "ft": {
+      "score": 1,
+      "note": "突破後有跟進，今日陽線收高"
+    },
+    "mi": {
+      "score": 0,
+      "note": "（AI 未詳述）M.I.：未通過。標準：Volume/OBV/CMF participation evidence"
+    }
+  },
+  "total_score": 4,
+  "grade": "C",
+  "decision": "skip",
+  "skip_reason": null,
+  "entry_plan": {
+    "preferred": "retest",
+    "entry": 407,
+    "stop": 398,
+    "tp1": 416,
+    "tp2": 425,
+    "rr": 2.0
+  },
+  "summary_zh": "趨勢強但而家追價，等回踩405-408企穩再考慮A級入場",
+  "_ai_warning": "有 3 項 AI 輸出唔完整，已用標準例子/備用說明補充。 改善：雙擊 加入ETN標準例子.bat 或 升級準確度.bat"
+}
