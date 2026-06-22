@@ -286,6 +286,25 @@ def launch_tradingview_debug() -> tuple[bool, str]:
     return True, "已啟動 TradingView（CDP 9222）— 等 CDP ready 後再分析"
 
 
+RRR_SCRIPT = Path(os.environ.get("RRR_SCRIPT", str(ROOT.parent / "RRR.py")))
+
+
+def launch_rrr() -> tuple[bool, str]:
+    """Start RRR.py Tkinter risk/reward calculator (local only)."""
+    if is_cloud_environment():
+        return False, "Cloud 模式唔支援本機 RRR"
+    script = Path(RRR_SCRIPT)
+    if not script.is_file():
+        return False, f"搵唔到 RRR.py：{script}"
+    creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if sys.platform == "win32" else 0
+    subprocess.Popen(
+        [sys.executable, str(script)],
+        cwd=str(script.parent),
+        creationflags=creationflags,
+    )
+    return True, "已啟動 RRR 風險回報計算器（Webhook :5000/tv_webhook）"
+
+
 def run_screener_analysis(csv_path: Path) -> tuple[bool, str, list[str]]:
     """Run screen_screener_csv.py on a screener export CSV."""
     logs = [f"Screener CSV: {csv_path}"]

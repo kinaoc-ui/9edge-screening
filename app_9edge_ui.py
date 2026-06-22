@@ -49,6 +49,10 @@ def launch_tradingview_debug():
     return _tv().launch_tradingview_debug()
 
 
+def launch_rrr():
+    return _tv().launch_rrr()
+
+
 def run_batch_csv_analysis():
     return _tv().run_batch_csv_analysis()
 
@@ -116,22 +120,137 @@ def load_guide(path: Path) -> str:
     return f"（搵唔到 {path.name}）"
 
 
+def init_report_library() -> None:
+    if "report_library" not in st.session_state:
+        st.session_state["report_library"] = []
+
+
+def register_report(
+    *,
+    title: str,
+    md: str,
+    path: Path | None = None,
+    symbol: str = "",
+) -> str:
+    """Add report to session 報告區 (newest first). Returns entry id."""
+    init_report_library()
+    sym = (symbol or "").strip().upper()
+    rid = f"{sym or 'RPT'}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    entry = {
+        "id": rid,
+        "title": title,
+        "md": md,
+        "path": str(path) if path else "",
+        "symbol": sym,
+        "ts": datetime.now().isoformat(timespec="seconds"),
+    }
+    lib: list[dict] = st.session_state["report_library"]
+    if sym:
+        lib = [e for e in lib if e.get("symbol") != sym]
+    lib.insert(0, entry)
+    st.session_state["report_library"] = lib[:40]
+    st.session_state["active_report_id"] = rid
+    return rid
+
+
 def set_view_report(
     path: Path | None,
     md: str,
     title: str,
     *,
     analyzed: bool = False,
+    symbol: str = "",
+    add_to_library: bool = True,
 ) -> None:
     st.session_state["view_report"] = md
     st.session_state["view_title"] = title
     st.session_state["view_report_path"] = str(path) if path else ""
     if analyzed:
         st.session_state["just_analyzed"] = True
+    if add_to_library:
+        register_report(title=title, md=md, path=path, symbol=symbol)
+
+
+def _report_entry_index(lib: list[dict], entry_id: str | None) -> int:
+    if not entry_id:
+        return 0
+    for i, e in enumerate(lib):
+        if e.get("id") == entry_id:
+            return i
+    return 0
+
+
+def _render_report_body(report: str, title: str, entry: dict | None = None) -> None:
+    st.markdown(f'<div id="nine-edge-report"></div>', unsafe_allow_html=True)
+    dl_name = "9edge_report.md"
+    if entry:
+        sym = entry.get("symbol") or ""
+        if sym:
+            dl_name = f"{sym}_9edge.md"
+        if entry.get("path"):
+            p = Path(entry["path"])
+            if p.exists():
+                st.caption(f"{p.name} · {entry.get('ts', '')[:19]}")
+                dl_name = p.name
+    elif path_str := st.session_state.get("view_report_path", ""):
+        p = Path(path_str)
+        if p.exists():
+            st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
+            dl_name = p.name
+    st.download_button(
+        "⬇️ 下載報告 (.md)",
+        data=report,
+        file_name=dl_name,
+        mime="text/markdown",
+        key=f"download_report_{entry.get('id') if entry else 'view'}",
+    )
+    st.markdown(report, unsafe_allow_html=True)
+
+
+def render_report_zone(*, empty_hint: str = "") -> bool:
+    """Main 報告區 — session library; analysis auto-adds here."""
+    init_report_library()
+    lib: list[dict] = st.session_state.get("report_library", [])
+    has_legacy = bool(st.session_state.get("view_report"))
+
+    if not lib and not has_legacy:
+        return False
+
+    st.subheader("📄 報告區")
+    if not lib:
+        if empty_hint:
+            st.caption(empty_hint)
+        if report := st.session_state.get("view_report"):
+            if st.session_state.pop("just_analyzed", False):
+                st.success("✅ 分析完成")
+            title = st.session_state.get("view_title", "Report")
+            _render_report_body(report, title)
+            return True
+        return False
+
+    if st.session_state.pop("just_analyzed", False):
+        st.success("✅ 分析完成 — 已自動加入報告區")
+
+    labels = [e["title"] for e in lib]
+    pick = st.selectbox(
+        "報告列表",
+        range(len(lib)),
+        format_func=lambda i: labels[i],
+        index=_report_entry_index(lib, st.session_state.get("active_report_id")),
+        key="report_zone_pick",
+        label_visibility="collapsed",
+    )
+    entry = lib[pick]
+    st.session_state["active_report_id"] = entry["id"]
+    st.session_state["view_report"] = entry["md"]
+    st.session_state["view_title"] = entry["title"]
+    st.session_state["view_report_path"] = entry.get("path", "")
+    _render_report_body(entry["md"], entry["title"], entry)
+    return True
 
 
 def render_report_panel() -> bool:
-    """Main report area. Returns True if a report is shown."""
+    """Legacy single-report panel (local fallback)."""
     if not (report := st.session_state.get("view_report")):
         return False
 
@@ -141,21 +260,7 @@ def render_report_panel() -> bool:
     title = st.session_state.get("view_title", "Report")
     st.markdown(f'<div id="nine-edge-report"></div>', unsafe_allow_html=True)
     st.subheader(f"📄 {title}")
-    report_path = st.session_state.get("view_report_path", "")
-    dl_name = "9edge_report.md"
-    if report_path:
-        p = Path(report_path)
-        if p.exists():
-            st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
-            dl_name = p.name
-    st.download_button(
-        "⬇️ 下載報告 (.md)",
-        data=report,
-        file_name=dl_name,
-        mime="text/markdown",
-        key="download_view_report",
-    )
-    st.markdown(report, unsafe_allow_html=True)
+    _render_report_body(report, title)
     return True
 
 
@@ -324,7 +429,10 @@ def run_csv_analysis(
             f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
             f"({result.decision})"
         )
-        set_view_report(result.report_path, result.report_md, title, analyzed=True)
+        set_view_report(
+            result.report_path, result.report_md, title,
+            analyzed=True, symbol=result.symbol or sym,
+        )
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
         st.toast(f"✅ {title}", icon="✅")
@@ -345,7 +453,10 @@ def run_yfinance_analysis(sym: str) -> None:
             f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
             f"({result.decision})"
         )
-        set_view_report(result.report_path, result.report_md, title, analyzed=True)
+        set_view_report(
+            result.report_path, result.report_md, title,
+            analyzed=True, symbol=result.symbol or sym,
+        )
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
         st.toast(f"✅ {title}", icon="✅")
@@ -384,30 +495,38 @@ def render_cloud_toolbar(default_sym: str = "") -> None:
 
 
 def render_cloud_sidebar() -> None:
-    """Cloud sidebar — everything collapsed; main area stays clean."""
+    """Cloud sidebar — session reports sync with main 報告區."""
     with st.expander("📄 報告庫", expanded=False):
-        if is_cloud_environment():
-            st.caption("Cloud 分析會暫存喺呢個 session；refresh 頁面會清。請用主區「下載報告」保存。")
-        recent = list_recent_reports()
-        if not recent:
-            st.caption("未有報告")
-        else:
-            labels = [report_label(p) for p in recent]
+        init_report_library()
+        lib = st.session_state.get("report_library", [])
+        if lib:
+            st.caption(f"今次 session：{len(lib)} 份 — 主區 **報告區** 會自動顯示")
+            labels = [e["title"] for e in lib]
             pick = st.selectbox(
-                "揀 report",
-                options=range(len(recent)),
+                "Session 報告",
+                range(len(lib)),
                 format_func=lambda i: labels[i],
-                key="cloud_report_pick",
+                index=_report_entry_index(lib, st.session_state.get("active_report_id")),
+                key="cloud_lib_pick",
             )
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("載入", use_container_width=True, key="cloud_sidebar_load"):
-                    p = recent[pick]
-                    set_view_report(p, load_report(p), labels[pick])
-            with c2:
-                if st.button("最新", use_container_width=True, key="cloud_sidebar_latest"):
-                    p = recent[0]
-                    set_view_report(p, load_report(p), labels[0])
+            st.session_state["active_report_id"] = lib[pick]["id"]
+        else:
+            st.caption("撳 **🔍 分析** 後會自動加入主區報告區")
+
+        batch = [p for p in list_recent_reports() if "_summary" in p.name]
+        if batch:
+            st.divider()
+            st.caption("Batch 摘要（GitHub）")
+            blabels = [report_label(p) for p in batch]
+            bpick = st.selectbox(
+                "Batch",
+                range(len(batch)),
+                format_func=lambda i: blabels[i],
+                key="cloud_batch_pick",
+            )
+            if st.button("載入摘要", use_container_width=True, key="cloud_batch_load"):
+                p = batch[bpick]
+                set_view_report(p, load_report(p), blabels[bpick])
 
     with st.expander("📤 進階", expanded=False):
         st.caption("一般唔使開；要上傳 TradingView CSV 或 .md 報告先用。")
@@ -571,7 +690,10 @@ def render_local_toolbar(
                 f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
                 f"({result.decision})"
             )
-            set_view_report(result.report_path, result.report_md, title, analyzed=True)
+            set_view_report(
+                result.report_path, result.report_md, title,
+                analyzed=True, symbol=result.symbol,
+            )
             st.session_state["last_result"] = result
             st.session_state.pop("last_error", None)
             st.toast(f"✅ {title}", icon="✅")
@@ -654,6 +776,25 @@ def render_local_toolbar(
                 st.session_state["last_error"] = msg
 
     st.divider()
+    st.subheader("💰 RRR · 風險回報計算")
+    rrr_path = ROOT.parent / "RRR.py"
+    st.caption(
+        f"開本機 **RRR.py**（倉位、止損/目標、Pool、TV webhook）\n"
+        f"`{rrr_path}`"
+    )
+    if st.button(
+        "💰 開 RRR 計算器",
+        use_container_width=True,
+        key=f"{key_prefix}_launch_rrr",
+    ):
+        ok, msg = launch_rrr()
+        append_logs([msg])
+        if ok:
+            st.toast(msg, icon="💰")
+        else:
+            st.session_state["last_error"] = msg
+
+    st.divider()
     st.subheader("🌐 第四步 · 分享俾朋友（GitHub → Streamlit Cloud）")
     st.caption("跑完 Screener 後 push，朋友開 Cloud link 就得 — 唔使連你部機。")
     commit_msg = st.text_input(
@@ -706,9 +847,11 @@ def main_cloud() -> None:
     if err := st.session_state.get("last_error"):
         st.error(err)
 
-    has_report = render_report_panel()
+    has_report = render_report_zone(
+        empty_hint="輸入代號撳 **🔍 分析**，報告會自動顯示喺報告區。",
+    )
     if not has_report:
-        st.info("輸入代號撳 **🔍 分析**，報告會顯示喺呢度。分析完可 **⬇️ 下載報告**；Sidebar **報告庫** 可載入今次 session 嘅報告。")
+        st.info("輸入代號撳 **🔍 分析**，報告會自動加入 **📄 報告區**。")
 
 
 def main_local(
@@ -727,7 +870,7 @@ def main_local(
     if err := st.session_state.get("last_error"):
         st.error(err)
 
-    has_report = bool(st.session_state.get("view_report"))
+    has_report = st.session_state.get("view_report") or st.session_state.get("report_library")
     render_tools_expander(
         connected,
         symbol_override,
@@ -738,7 +881,7 @@ def main_local(
         key="tools_top",
     )
 
-    has_report = render_report_panel()
+    has_report = render_report_zone()
 
     render_tools_expander(
         connected,
