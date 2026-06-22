@@ -20,6 +20,7 @@ CSV_DIR = ROOT / "charts" / "csv"
 REPORTS = ROOT / "reports" / "batch"
 CSV_LABELS = ("W1", "D1", "H1")
 _CLOUD_CSV_DIR: Path | None = None
+_CLOUD_REPORTS_DIR: Path | None = None
 
 
 def is_cloud_environment() -> bool:
@@ -38,6 +39,18 @@ def is_cloud_environment() -> bool:
     if Path("/mount/src").is_dir():
         return True
     return False
+
+
+def get_reports_dir(*, cloud: bool | None = None) -> Path:
+    """Writable report directory; cloud uses ephemeral temp (per app session)."""
+    global _CLOUD_REPORTS_DIR
+    use_cloud = is_cloud_environment() if cloud is None else cloud
+    if use_cloud:
+        if _CLOUD_REPORTS_DIR is None:
+            _CLOUD_REPORTS_DIR = Path(tempfile.gettempdir()) / "9edge" / "reports"
+        _CLOUD_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        return _CLOUD_REPORTS_DIR
+    return REPORTS
 
 
 def get_csv_dir(*, cloud: bool | None = None) -> Path:
@@ -144,14 +157,17 @@ def save_csv_uploads(
 
 
 def list_recent_reports(limit: int = 20) -> list[Path]:
-    if not REPORTS.exists():
-        return []
-    files = [
-        *REPORTS.glob("*_9edge_csv.md"),
-        *REPORTS.glob("*_9edge_yf.md"),
-        *REPORTS.glob("*_summary.md"),
-    ]
-    files = sorted(set(files), key=lambda p: p.stat().st_mtime, reverse=True)
+    files: list[Path] = []
+    rdir = get_reports_dir()
+    if rdir.exists():
+        files.extend(rdir.glob("*_9edge_csv.md"))
+        files.extend(rdir.glob("*_9edge_yf.md"))
+    if REPORTS.exists():
+        files.extend(REPORTS.glob("*_summary.md"))
+        if not is_cloud_environment():
+            files.extend(REPORTS.glob("*_9edge_csv.md"))
+            files.extend(REPORTS.glob("*_9edge_yf.md"))
+    files = sorted({p.resolve() for p in files if p.exists()}, key=lambda p: p.stat().st_mtime, reverse=True)
     return files[:limit]
 
 
@@ -192,13 +208,13 @@ def run_analyze_from_csv(
             h1 if h1.exists() else None,
         )
         report_md = mod.format_md(data)
-        report_path = REPORTS / f"{sym}_{date.today().isoformat()}_9edge_csv.md"
-        if not is_cloud_environment():
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(report_md, encoding="utf-8")
+        report_dir = get_reports_dir()
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{sym}_{date.today().isoformat()}_9edge_csv.md"
+        report_path.write_text(report_md, encoding="utf-8")
 
         result.ok = True
-        result.report_path = report_path if report_path.exists() else None
+        result.report_path = report_path
         result.report_md = report_md
         result.grade = data.get("grade", "")
         result.total_score = data.get("total_score", 0)
@@ -233,11 +249,10 @@ def run_analyze_from_yfinance(symbol: str) -> PipelineResult:
             return result
 
         report_md = mod.format_md(data)
-        report_path: Path | None = None
-        if not is_cloud_environment():
-            report_path = REPORTS / f"{sym}_{date.today().isoformat()}_9edge_yf.md"
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(report_md, encoding="utf-8")
+        report_dir = get_reports_dir()
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{sym}_{date.today().isoformat()}_9edge_yf.md"
+        report_path.write_text(report_md, encoding="utf-8")
 
         result.ok = True
         result.report_path = report_path

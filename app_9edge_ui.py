@@ -142,10 +142,19 @@ def render_report_panel() -> bool:
     st.markdown(f'<div id="nine-edge-report"></div>', unsafe_allow_html=True)
     st.subheader(f"📄 {title}")
     report_path = st.session_state.get("view_report_path", "")
+    dl_name = "9edge_report.md"
     if report_path:
         p = Path(report_path)
         if p.exists():
             st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
+            dl_name = p.name
+    st.download_button(
+        "⬇️ 下載報告 (.md)",
+        data=report,
+        file_name=dl_name,
+        mime="text/markdown",
+        key="download_view_report",
+    )
     st.markdown(report, unsafe_allow_html=True)
     return True
 
@@ -377,6 +386,8 @@ def render_cloud_toolbar(default_sym: str = "") -> None:
 def render_cloud_sidebar() -> None:
     """Cloud sidebar — everything collapsed; main area stays clean."""
     with st.expander("📄 報告庫", expanded=False):
+        if is_cloud_environment():
+            st.caption("Cloud 分析會暫存喺呢個 session；refresh 頁面會清。請用主區「下載報告」保存。")
         recent = list_recent_reports()
         if not recent:
             st.caption("未有報告")
@@ -695,7 +706,9 @@ def main_cloud() -> None:
     if err := st.session_state.get("last_error"):
         st.error(err)
 
-    render_report_panel()
+    has_report = render_report_panel()
+    if not has_report:
+        st.info("輸入代號撳 **🔍 分析**，報告會顯示喺呢度。分析完可 **⬇️ 下載報告**；Sidebar **報告庫** 可載入今次 session 嘅報告。")
 
 
 def main_local(
