@@ -36,12 +36,120 @@ TV_EXCHANGE_MAP = {
     "NGM": "NASDAQ",
     "NCM": "NASDAQ",
     "NAS": "NASDAQ",
+    "NASDAQ": "NASDAQ",
     "NYQ": "NYSE",
     "NYS": "NYSE",
+    "NYSE": "NYSE",
     "ASE": "AMEX",
+    "AMEX": "AMEX",
     "PCX": "NYSEARCA",
+    "ARCA": "NYSEARCA",
+    "NYSE ARCA": "NYSEARCA",
+    "NYSEARCA": "NYSEARCA",
     "BTS": "NYSE",
 }
+
+
+def _exchange_from_row(row: dict) -> str:
+    for key, val in row.items():
+        kn = key.strip().lower().replace(" ", "_")
+        if kn in ("exchange", "primary_exchange", "listing_exchange"):
+            v = (val or "").strip()
+            if v:
+                return v
+    return ""
+
+
+def tv_prefix_from_exchange(exchange: str) -> str:
+    ex = (exchange or "").strip().upper()
+    if not ex:
+        return "NASDAQ"
+    if ex in TV_EXCHANGE_MAP:
+        return TV_EXCHANGE_MAP[ex]
+    return "NASDAQ"
+
+
+def resolve_tv_ticker(
+    symbol: str,
+    cache: dict[str, str],
+    meta: dict | None = None,
+) -> str:
+    """EXCHANGE:SYMBOL for TV — prefer screener meta; bare symbol if exchange unknown."""
+    sym = symbol.upper().strip()
+    if sym in cache:
+        return cache[sym]
+
+    m = meta or {}
+    ex = (m.get("exchange") or "").strip()
+    if ex:
+        tv = f"{tv_prefix_from_exchange(ex)}:{sym}"
+        cache[sym] = tv
+        return tv
+
+    import yfinance as yf
+
+    prefix = ""
+    try:
+        t = yf.Ticker(sym)
+        fi = getattr(t, "fast_info", None)
+        ex_code = (getattr(fi, "exchange", None) or "").upper()
+        if not ex_code:
+            ex_code = ((t.info or {}).get("exchange") or "").upper()
+        prefix = TV_EXCHANGE_MAP.get(ex_code, "")
+    except Exception:
+        pass
+
+    tv = f"{prefix}:{sym}" if prefix else sym
+    cache[sym] = tv
+    return tv
+
+
+def prefetch_tv_exchanges(
+    symbols: list[str],
+    meta: dict[str, dict],
+    cache: dict[str, str],
+    *,
+    chunk_size: int = 40,
+) -> None:
+    """Batch-resolve exchanges before export (reduce yfinance rate-limit → 錯 NASDAQ)."""
+    pending = [
+        s.upper()
+        for s in symbols
+        if s.upper() not in cache and not (meta.get(s.upper()) or {}).get("exchange")
+    ]
+    if not pending:
+        return
+
+    import yfinance as yf
+
+    for i in range(0, len(pending), chunk_size):
+        batch = pending[i : i + chunk_size]
+        for sym in batch:
+            m = meta.get(sym) or {}
+            ex = (m.get("exchange") or "").strip()
+            if ex:
+                cache[sym] = f"{tv_prefix_from_exchange(ex)}:{sym}"
+        still = [s for s in batch if s not in cache]
+        if not still:
+            continue
+        try:
+            time.sleep(0.25)
+            tickers = yf.Tickers(" ".join(still))
+            for sym in still:
+                try:
+                    t = tickers.tickers.get(sym) or yf.Ticker(sym)
+                    fi = getattr(t, "fast_info", None)
+                    ex_code = (getattr(fi, "exchange", None) or "").upper()
+                    if not ex_code:
+                        ex_code = ((t.info or {}).get("exchange") or "").upper()
+                    prefix = TV_EXCHANGE_MAP.get(ex_code, "")
+                    cache[sym] = f"{prefix}:{sym}" if prefix else sym
+                except Exception:
+                    cache[sym] = sym
+        except Exception:
+            for sym in still:
+                if sym not in cache:
+                    cache[sym] = sym
 
 
 def read_screener_rows(path: Path) -> list[dict]:
@@ -72,6 +180,7 @@ def meta_from_results(results: list[dict]) -> dict[str, dict]:
                 "sector": m.get("sector") or "",
                 "industry": m.get("industry") or "",
                 "price": m.get("price") or "",
+                "exchange": m.get("exchange") or "",
             }
     return meta
 
@@ -88,6 +197,7 @@ def read_screener_meta(path: Path) -> dict[str, dict]:
             "sector": (row.get("Sector") or "").strip(),
             "industry": (row.get("Industry") or "").strip(),
             "price": (row.get("Price") or "").strip(),
+            "exchange": _exchange_from_row(row),
         }
     return meta
 
@@ -95,23 +205,6 @@ def read_screener_meta(path: Path) -> dict[str, dict]:
 def _safe_filename(name: str) -> str:
     s = re.sub(r"[^\w\s-]", "", name, flags=re.UNICODE)
     return re.sub(r"\s+", "_", s.strip())[:60] or "unknown"
-
-
-def resolve_tv_ticker(symbol: str, cache: dict[str, str]) -> str:
-    if symbol in cache:
-        return cache[symbol]
-    import yfinance as yf
-
-    prefix = "NASDAQ"
-    try:
-        info = yf.Ticker(symbol).info or {}
-        ex = (info.get("exchange") or "").upper()
-        prefix = TV_EXCHANGE_MAP.get(ex, prefix)
-    except Exception:
-        pass
-    tv = f"{prefix}:{symbol}"
-    cache[symbol] = tv
-    return tv
 
 
 def list_tv_export_dirs() -> list[Path]:
@@ -174,6 +267,51 @@ def write_tv_sector_industry_txt(
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _export_rows_by_sector(
+    rows: list[dict],
+    out_dir: Path,
+    *,
+    folder_name: str,
+) -> None:
+    """One comma .txt per sector — TV 要分 sector 就逐個 import。"""
+    if not rows:
+        return
+    sector_dir = out_dir / folder_name
+    sector_dir.mkdir(parents=True, exist_ok=True)
+    by_sector: dict[str, list[dict]] = {}
+    for x in rows:
+        sec = x.get("sector") or "Unknown"
+        by_sector.setdefault(sec, []).append(x)
+    for sec, sec_rows in sorted(by_sector.items()):
+        tickers = [x["tv_ticker"] for x in sec_rows]
+        fname = _safe_filename(sec)
+        write_tv_txt(tickers, sector_dir / f"{fname}_comma.txt", comma=True)
+        write_tv_txt(tickers, sector_dir / f"{fname}_lines.txt", comma=False)
+
+
+def _export_rows_by_sector_industry(
+    rows: list[dict],
+    out_dir: Path,
+    *,
+    folder_name: str,
+) -> None:
+    """One comma .txt per sector+industry — 可直接 import 做分組 watchlist。"""
+    if not rows:
+        return
+    si_dir = out_dir / folder_name
+    si_dir.mkdir(parents=True, exist_ok=True)
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for x in rows:
+        sec = x.get("sector") or "Unknown"
+        ind = x.get("industry") or "Unknown"
+        groups.setdefault((sec, ind), []).append(x)
+    for (sec, ind), grp in sorted(groups.items()):
+        tickers = [x["tv_ticker"] for x in grp]
+        fname = f"{_safe_filename(sec)}__{_safe_filename(ind)}"
+        write_tv_txt(tickers, si_dir / f"{fname}_comma.txt", comma=True)
+        write_tv_txt(tickers, si_dir / f"{fname}_lines.txt", comma=False)
+
+
 def enrich_result_row(r: dict, meta: dict[str, dict], tv_cache: dict[str, str]) -> dict:
     sym = r["symbol"]
     m = meta.get(sym) or {}
@@ -190,7 +328,7 @@ def enrich_result_row(r: dict, meta: dict[str, dict], tv_cache: dict[str, str]) 
         shortlist = grade in ("A", "B") and setup_ev.get("passes", False)
     return {
         "symbol": sym,
-        "tv_ticker": resolve_tv_ticker(sym, tv_cache),
+        "tv_ticker": resolve_tv_ticker(sym, tv_cache, m),
         "sector": m.get("sector") or "",
         "industry": m.get("industry") or "",
         "description": m.get("description") or "",
@@ -222,6 +360,8 @@ def export_tv_watchlists(
     """Export TV .txt watchlists + classified CSV with sector/industry."""
     out_dir.mkdir(parents=True, exist_ok=True)
     tv_cache: dict[str, str] = {}
+    symbols = [r["symbol"] for r in results]
+    prefetch_tv_exchanges(symbols, meta, tv_cache)
     rows = [enrich_result_row(r, meta, tv_cache) for r in results]
 
     a_rows = [x for x in rows if x["grade"] == "A"]
@@ -250,13 +390,16 @@ def export_tv_watchlists(
         "  B_grade_comma.txt       — B 級 Watch\n"
         "  B_grade_by_sector_industry.txt — B 級按 Sector + Industry 分組\n"
         "  AB_grade_comma.txt      — A/B 級 + 雙 Setup valid + 至少一個 ≥3R\n"
-        "  AB_grade_by_sector_industry.txt — 同上，按 Sector + Industry 分組\n"
+        "  AB_grade_by_sector_industry.txt — 同上，按 Sector + Industry 分組（參考）\n"
+        "  AB_by_sector/*.txt           — AB 短名單按 Sector（逐個 import = 分 sector）\n"
+        "  AB_by_sector_industry/*.txt   — AB 按 Sector+Industry（逐個 import）\n"
         "  Potential_Top20_comma.txt — 潛力榜 Top 20\n"
         "  Score7plus_comma.txt    — 現況 ≥7\n"
         "  A_by_sector/*.txt        — A 級只按 Sector 分組（comma）\n"
-        "  classified_full.csv      — 完整表（含 Sector / Industry）\n\n"
-        "Note: TV 官方 import 用 *_comma.txt（唔支援 sector header）。\n"
-        "      要 sector + industry 分組睇 A_grade_by_sector_industry.txt。\n",
+        "  classified_full.csv      — 完整表（含 Sector / Industry / tv_ticker）\n\n"
+        "Note: TV 官方 comma import 唔支援 sector header（會變一個 flat list）。\n"
+        "      要分 sector → import AB_by_sector/ 入面每個檔做一個 watchlist。\n"
+        "      紅色 symbol = exchange 錯（已改用 screener CSV Exchange 欄）。\n",
         encoding="utf-8",
     )
 
@@ -275,28 +418,28 @@ def export_tv_watchlists(
 
     if a_rows:
         write_tv_sector_industry_txt(
-            a_rows, out_dir / "A_grade_by_sector_industry.txt", group_label="A_Grade"
+            a_rows, out_dir / "A_grade_by_sector_industry.txt",
+            group_label="A_Grade", use_tv_ticker=True,
         )
     if b_rows:
         write_tv_sector_industry_txt(
-            b_rows, out_dir / "B_grade_by_sector_industry.txt", group_label="B_Grade"
+            b_rows, out_dir / "B_grade_by_sector_industry.txt",
+            group_label="B_Grade", use_tv_ticker=True,
         )
     if ab_rows:
         write_tv_sector_industry_txt(
-            ab_rows, out_dir / "AB_grade_by_sector_industry.txt", group_label="AB_Grade"
+            ab_rows, out_dir / "AB_grade_by_sector_industry.txt",
+            group_label="AB_Grade", use_tv_ticker=True,
         )
 
-    sector_dir = out_dir / "A_by_sector"
-    sector_dir.mkdir(exist_ok=True)
+    _export_rows_by_sector(a_rows, out_dir, folder_name="A_by_sector")
+    _export_rows_by_sector(ab_rows, out_dir, folder_name="AB_by_sector")
+    _export_rows_by_sector_industry(ab_rows, out_dir, folder_name="AB_by_sector_industry")
+
     by_sector: dict[str, list[dict]] = {}
     for x in a_rows:
         sec = x["sector"] or "Unknown"
         by_sector.setdefault(sec, []).append(x)
-    for sec, sec_rows in sorted(by_sector.items()):
-        tickers = [x["tv_ticker"] for x in sec_rows]
-        fname = _safe_filename(sec)
-        write_tv_txt(tickers, sector_dir / f"{fname}_comma.txt", comma=True)
-        write_tv_txt(tickers, sector_dir / f"{fname}_lines.txt", comma=False)
 
     csv_path = out_dir / "classified_full.csv"
     fields = [

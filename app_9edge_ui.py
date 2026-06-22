@@ -116,7 +116,9 @@ def render_tv_watchlist_import(
     st.markdown("**📥 TV Watchlist 匯入**")
     st.caption(
         "揀 `tv_import` 入面嘅 comma 清單 → 下載手動 import，或經 MCP 逐隻加入而家嘅 TV watchlist"
-        "（要 TradingView Desktop + CDP 9222）"
+        "（要 TradingView Desktop + CDP 9222）。"
+        " **要分 Sector**：用 `AB_by_sector/` 或 `AB_by_sector_industry/` 入面逐個檔 import；"
+        "flat `*_comma.txt` 唔會自動分組。"
     )
 
     export_dirs = screener.list_tv_export_dirs()
@@ -398,6 +400,11 @@ def register_report(
     lib.insert(0, entry)
     st.session_state["report_library"] = lib[:40]
     st.session_state["active_report_id"] = rid
+    # 新分析要覆蓋 selectbox 舊選擇，否則報告區仍顯示上一份
+    catalog = cloud_report_catalog()
+    pick_idx = _report_entry_index(catalog, rid)
+    st.session_state["report_zone_pick"] = pick_idx
+    st.session_state["cloud_lib_pick"] = pick_idx
     return rid
 
 
@@ -528,12 +535,23 @@ def render_report_zone(*, empty_hint: str = "") -> bool:
     if st.session_state.pop("just_analyzed", False):
         st.success("✅ 分析完成 — 已自動加入報告區")
 
+    active_idx = _report_entry_index(catalog, st.session_state.get("active_report_id"))
+    if "report_zone_pick" not in st.session_state:
+        st.session_state["report_zone_pick"] = active_idx
+    else:
+        pick_cur = int(st.session_state["report_zone_pick"])
+        if pick_cur >= len(catalog):
+            st.session_state["report_zone_pick"] = active_idx
+        else:
+            lib_id = st.session_state.get("active_report_id")
+            if lib_id and catalog[pick_cur].get("id") != lib_id:
+                st.session_state["report_zone_pick"] = active_idx
+
     labels = [e["title"] for e in catalog]
     pick = st.selectbox(
         "報告列表",
         range(len(catalog)),
         format_func=lambda i: labels[i],
-        index=_report_entry_index(catalog, st.session_state.get("active_report_id")),
         key="report_zone_pick",
         label_visibility="collapsed",
     )
@@ -797,11 +815,19 @@ def render_cloud_sidebar() -> None:
         if catalog:
             st.caption(f"共 {len(catalog)} 份（分析後自動加入）")
             labels = [e["title"] for e in catalog]
+            active_idx = _report_entry_index(catalog, st.session_state.get("active_report_id"))
+            if "cloud_lib_pick" not in st.session_state:
+                st.session_state["cloud_lib_pick"] = active_idx
+            else:
+                pick_cur = int(st.session_state["cloud_lib_pick"])
+                if pick_cur >= len(catalog):
+                    st.session_state["cloud_lib_pick"] = active_idx
+                elif catalog[pick_cur].get("id") != st.session_state.get("active_report_id"):
+                    st.session_state["cloud_lib_pick"] = active_idx
             pick = st.selectbox(
                 "報告",
                 range(len(catalog)),
                 format_func=lambda i: labels[i],
-                index=_report_entry_index(catalog, st.session_state.get("active_report_id")),
                 key="cloud_lib_pick",
             )
             _apply_catalog_entry(catalog[pick])
@@ -992,6 +1018,7 @@ def render_local_toolbar(
             st.session_state["last_result"] = result
             st.session_state.pop("last_error", None)
             st.toast(f"✅ {title}", icon="✅")
+            st.rerun()
         else:
             st.session_state["last_error"] = result.error
 

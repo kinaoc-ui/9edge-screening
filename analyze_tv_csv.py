@@ -4301,28 +4301,35 @@ def collect_sr_draw_levels(
         lbl = f"{ptf} Multiple edge ({ec}源:{src})" if ec >= 2 else f"{ptf} Trading area"
         try_add({"price": (zlo + zhi) / 2, "label": lbl, "tf": ptf, "rank": 0})
 
-    for area_obj in sorted(
-        build_resistance_areas(d1, bars=bars),
-        key=lambda a: (-(a.get("edge_count") or 0), a["zone_hi"]),
-    ):
+    if len(items) >= max_levels:
+        return items[:max_levels]
+
+    c = d1["close"]
+    sup_levels = [
+        {"price": p, "label": _format_sr_keylevel_label(src, "support"), "tf": _parse_tf_source(src)[0] or "D1"}
+        for src, p in (d1.get("all_support_sources") or [])
+        if p and p < c * 0.999
+    ]
+    res_levels = [
+        {"price": p, "label": _format_sr_keylevel_label(src, "resistance"), "tf": _parse_tf_source(src)[0] or "D1"}
+        for src, p in (d1.get("all_resistance_sources") or [])
+        if p and p > c * 1.001
+    ]
+    for area in cluster_levels_to_areas(sup_levels):
         if len(items) >= max_levels:
             break
         try_add({
-            "price": area_obj["mid"],
-            "label": area_obj.get("area_label") or f"阻力區 {format_area_range(area_obj['zone_lo'], area_obj['zone_hi'])}",
+            "price": area["mid"],
+            "label": area.get("area_label") or f"支持區 {format_area_range(area['zone_lo'], area['zone_hi'])}",
             "tf": "D1",
             "rank": 1,
         })
-
-    for area_obj in sorted(
-        build_support_areas(d1, bars=bars),
-        key=lambda a: (-(a.get("edge_count") or 0), -a["zone_lo"]),
-    ):
+    for area in cluster_levels_to_areas(res_levels):
         if len(items) >= max_levels:
             break
         try_add({
-            "price": area_obj["mid"],
-            "label": area_obj.get("area_label") or f"支持區 {format_area_range(area_obj['zone_lo'], area_obj['zone_hi'])}",
+            "price": area["mid"],
+            "label": area.get("area_label") or f"阻力區 {format_area_range(area['zone_lo'], area['zone_hi'])}",
             "tf": "D1",
             "rank": 1,
         })
@@ -4353,6 +4360,72 @@ def collect_sr_draw_levels(
         })
 
     return items[:max_levels]
+
+
+def key_sr_zones(
+    d1: dict,
+    bars: list[dict] | None = None,
+    *,
+    max_levels: int = SR_DRAW_MAX_ZONES,
+) -> list[dict]:
+    """Canonical 關鍵 S/R zones — pivot bands + merged sources (all analysis uses this)."""
+    return collect_sr_draw_levels(d1, bars=bars, max_levels=max_levels)
+
+
+def _key_sr_zone_as_level(zone: dict, *, side: str) -> dict:
+    zlo = round(zone["zone_lo"], 2)
+    zhi = round(zone["zone_hi"], 2)
+    tf = zone.get("tf") or "W1"
+    price = zlo if side == "support" else zhi
+    return {
+        "price": price,
+        "zone_lo": zlo,
+        "zone_hi": zhi,
+        "label": zone["label"],
+        "tf": tf,
+        "priority": TF_PRIORITY.get(tf, 9),
+    }
+
+
+def key_sr_levels_below(
+    d1: dict,
+    bars: list[dict] | None,
+    ref: float,
+) -> list[dict]:
+    """Key S/R support levels below ref (nearest first)."""
+    out = [
+        _key_sr_zone_as_level(z, side="support")
+        for z in key_sr_zones(d1, bars)
+        if z["zone_hi"] < ref * 0.997
+    ]
+    return sorted(out, key=lambda lv: (-lv["price"], lv["priority"]))
+
+
+def key_sr_levels_above(
+    d1: dict,
+    bars: list[dict] | None,
+    ref: float,
+) -> list[dict]:
+    """Key S/R resistance levels above ref (nearest first)."""
+    out = [
+        _key_sr_zone_as_level(z, side="resistance")
+        for z in key_sr_zones(d1, bars)
+        if z["zone_lo"] > ref * 1.003
+    ]
+    return sorted(out, key=lambda lv: (lv["price"], lv["priority"]))
+
+
+def find_key_sr_zone_for_price(
+    d1: dict,
+    bars: list[dict] | None,
+    price: float,
+    *,
+    tol: float = 0.03,
+) -> dict | None:
+    for z in key_sr_zones(d1, bars):
+        if z["zone_lo"] - tol <= price <= z["zone_hi"] + tol:
+            return z
+    return None
 
 
 def analyze_sr_merged(
@@ -4415,11 +4488,11 @@ def sr_levels_to_tv_shapes(
 
 
 def format_sr_key_levels_section(d1: dict, bars: list[dict] | None = None) -> list[str]:
-    """Key S/R levels for report (alongside W1 channel reference)."""
-    levels = collect_sr_draw_levels(d1, bars=bars, max_levels=10)
+    """Key S/R levels used for analysis + chart draw."""
+    levels = key_sr_zones(d1, bars=bars, max_levels=10)
     if not levels:
         return []
-    lines = ["### 關鍵 S/R 水平（圖表用）", ""]
+    lines = ["### 關鍵 S/R 水平", ""]
     for lv in levels:
         if lv["kind"] == "zone":
             lines.append(f"- **{lv['label']}**：{format_area_range(lv['zone_lo'], lv['zone_hi'])}")
@@ -4465,13 +4538,16 @@ def _format_sr_keylevel_label(src: str, role: str = "support", default_tf: str =
 
 
 def collect_structural_support_levels(d1: dict) -> list[dict]:
-    """Structural supports from W1 pivot bands + D1/H1 (MA, gap, swing)."""
+    """Structural supports — pivot bands + merged support sources (feeds key S/R)."""
     levels: list[dict] = []
     seen: set[float] = set()
+    c = d1.get("close") or 0
 
     def add(price: float, label: str, tf: str) -> None:
         p = round(price, 2)
         if p <= 0 or p in seen:
+            return
+        if c and p >= c * 0.999:
             return
         seen.add(p)
         levels.append({
@@ -4484,37 +4560,43 @@ def collect_structural_support_levels(d1: dict) -> list[dict]:
     for band in d1.get("pivot_sr_bands") or []:
         if band.get("side") != "support":
             continue
-        add(band["price"], f"W1 {band['label']}", "W1")
-
-    area = d1.get("trading_area") or {}
-    zone_lo = area.get("zone_lo") or 0
-    if zone_lo:
-        ptf = area.get("primary_tf") or d1.get("wave_bottom_tf") or "D1"
-        sources = area.get("sources") or []
-        if sources:
-            parts = [_format_sr_keylevel_label(s, "support", ptf) for s in sources[:2]]
-            lbl = " / ".join(parts) + " / Trading area low"
-        else:
-            lbl = f"{ptf} Trading area low"
-        add(zone_lo, lbl, ptf)
+        add(band.get("zone_lo") or band["price"], f"W1 {band['label']}", "W1")
 
     for src, price in d1.get("all_support_sources") or []:
         tf, _ = _parse_tf_source(src)
         add(price, _format_sr_keylevel_label(src, "support"), tf or "D1")
 
-    wb_tf = d1.get("wave_bottom_tf") or "D1"
-    wb = d1.get("wave_bottom") or 0
-    if wb and not d1.get("broke_bottom"):
-        add(wb, f"{wb_tf} 前浪底", wb_tf)
+    return levels
 
-    wt_tf = d1.get("wave_top_tf") or "D1"
-    wt = d1.get("wave_top") or 0
-    if wt and d1.get("retest_as_support"):
-        add(wt, f"{wt_tf} 前浪頂（阻力→支持）", wt_tf)
 
-    swing_lo = d1.get("swing_low") or 0
-    if swing_lo:
-        add(swing_lo, "D1 20日低", "D1")
+def collect_structural_resistance_levels(d1: dict) -> list[dict]:
+    """Structural resistances — pivot bands + merged resistance sources (feeds key S/R)."""
+    levels: list[dict] = []
+    seen: set[float] = set()
+    c = d1.get("close") or 0
+
+    def add(price: float, label: str, tf: str) -> None:
+        p = round(price, 2)
+        if p <= 0 or p in seen:
+            return
+        if c and p <= c * 1.001:
+            return
+        seen.add(p)
+        levels.append({
+            "price": p,
+            "label": label,
+            "tf": tf,
+            "priority": TF_PRIORITY.get(tf, 9),
+        })
+
+    for band in d1.get("pivot_sr_bands") or []:
+        if band.get("side") != "resistance":
+            continue
+        add(band.get("zone_hi") or band["price"], f"W1 {band['label']}", "W1")
+
+    for src, price in d1.get("all_resistance_sources") or []:
+        tf, _ = _parse_tf_source(src)
+        add(price, _format_sr_keylevel_label(src, "resistance"), tf or "D1")
 
     return levels
 
@@ -4789,48 +4871,6 @@ def find_area_for_price(price: float, areas: list[dict], tol: float = 0.03) -> d
     return None
 
 
-def collect_structural_resistance_levels(d1: dict) -> list[dict]:
-    """Structural resistances from W1 pivot bands + D1/H1 (MA, gap, swing)."""
-    levels: list[dict] = []
-    seen: set[float] = set()
-
-    def add(price: float, label: str, tf: str) -> None:
-        p = round(price, 2)
-        if p <= 0 or p in seen:
-            return
-        seen.add(p)
-        levels.append({
-            "price": p,
-            "label": label,
-            "tf": tf,
-            "priority": TF_PRIORITY.get(tf, 9),
-        })
-
-    for band in d1.get("pivot_sr_bands") or []:
-        if band.get("side") != "resistance":
-            continue
-        add(band["price"], f"W1 {band['label']}", "W1")
-
-    for src, price in d1.get("all_resistance_sources") or []:
-        tf, _ = _parse_tf_source(src)
-        add(price, _format_sr_keylevel_label(src, "resistance"), tf or "D1")
-
-    for tf, wt in (d1.get("tf_wave_tops") or {}).items():
-        if wt and not d1.get("broke_top"):
-            add(wt, f"{tf} 前浪頂", tf)
-
-    wb_tf = d1.get("wave_bottom_tf") or "D1"
-    wb = d1.get("wave_bottom") or 0
-    if wb and d1.get("broke_bottom"):
-        add(wb, f"{wb_tf} 前浪底（支持→阻力）", wb_tf)
-
-    resist = d1.get("resistance") or 0
-    if resist:
-        add(resist, "D1 60日阻力", "D1")
-
-    return levels
-
-
 def _pick_nearest_structural_level(
     levels: list[dict],
     reference: float,
@@ -4858,20 +4898,19 @@ def _pick_nearest_structural_level(
     return max(candidates, key=lambda lv: (lv["price"], -lv["priority"]))
 
 
-def resolve_stop_keylevel(d1: dict, stop: float, setup_kind: str = "current") -> str:
-    """Human-readable stop key level (TF + structure type), price shown separately in report."""
-    support_areas = build_support_areas(d1)
-    area = find_area_for_price(stop, support_areas)
-    if area and area["edge_count"] >= 2:
-        return area["area_label"]
-    for lv in collect_structural_support_levels(d1):
+def resolve_stop_keylevel(
+    d1: dict,
+    stop: float,
+    setup_kind: str = "current",
+    bars: list[dict] | None = None,
+) -> str:
+    """Human-readable stop key level from 關鍵 S/R."""
+    z = find_key_sr_zone_for_price(d1, bars, stop)
+    if z:
+        return z["label"]
+    for lv in key_sr_levels_below(d1, bars, stop + 0.01):
         if _price_matches(stop, lv["price"]):
             return lv["label"]
-
-    wt_tf = d1.get("wave_top_tf") or "D1"
-    wt = d1.get("wave_top") or 0
-    if setup_kind == "breakout" and wt and wt < stop <= wt * 1.02:
-        return f"{wt_tf} 前浪頂下（突破失效）"
     return ""
 
 
@@ -4887,26 +4926,31 @@ def resolve_tp2_keylevel(d1: dict, reward_type: str, reward_label: str) -> str:
     return "—"
 
 
-def _supports_for_stop(d1: dict, entry: float, setup_kind: str) -> list[dict]:
-    """Supports below entry; retest stops must clear the entry/trading zone."""
-    supports = collect_structural_support_levels(d1)
-    area = d1.get("trading_area") or {}
-    zone_lo = area.get("zone_lo") or 0
-    zone_band_lo = zone_lo * (1 - SR_CONFLUENCE_BAND_PCT) if zone_lo else 0
-    out: list[dict] = []
-    for lv in supports:
-        if lv["price"] >= entry:
-            continue
-        if setup_kind == "retest" and zone_lo:
-            if lv["price"] >= zone_band_lo:
-                continue
-        out.append(lv)
-    return out
+def _supports_for_stop(
+    d1: dict,
+    entry: float,
+    setup_kind: str,
+    bars: list[dict] | None = None,
+) -> list[dict]:
+    """Key S/R supports below entry."""
+    supports = key_sr_levels_below(d1, bars, entry)
+    if setup_kind != "retest":
+        return supports
+    zone = find_key_sr_zone_for_price(d1, bars, entry)
+    if not zone:
+        return supports
+    zone_band_lo = zone["zone_lo"] * (1 - SR_CONFLUENCE_BAND_PCT)
+    return [lv for lv in supports if lv["price"] < zone_band_lo]
 
 
-def pick_structure_stop(d1: dict, entry: float, setup_kind: str = "current") -> tuple[float, str]:
-    """Structure-based stop from merged W1+D1+H1 supports below entry."""
-    supports = _supports_for_stop(d1, entry, setup_kind)
+def pick_structure_stop(
+    d1: dict,
+    entry: float,
+    setup_kind: str = "current",
+    bars: list[dict] | None = None,
+) -> tuple[float, str]:
+    """Structure-based stop from 關鍵 S/R support below entry."""
+    supports = _supports_for_stop(d1, entry, setup_kind, bars)
     if setup_kind in ("breakout", "current"):
         swing_pool = [lv for lv in supports if lv.get("tf") in SWING_STOP_TFS]
         pool = swing_pool if swing_pool else supports
@@ -4919,15 +4963,9 @@ def pick_structure_stop(d1: dict, entry: float, setup_kind: str = "current") -> 
         )
     if not pick:
         return 0, ""
-    area = find_area_for_price(pick["price"], build_support_areas(d1))
-    if area and area["edge_count"] >= 2:
-        short_src = " / ".join(area["sources"][:2])
-        if len(area["sources"]) > 2:
-            short_src += f" +{len(area['sources']) - 2}"
-        return pick["price"], (
-            f"支持區 {format_area_range(area['zone_lo'], area['zone_hi'])}"
-            f"（{area['edge_count']}源:{short_src}） ${pick['price']:.2f}"
-        )
+    z = find_key_sr_zone_for_price(d1, bars, pick["price"])
+    if z:
+        return pick["price"], f"{z['label']} {format_area_range(z['zone_lo'], z['zone_hi'])} ${pick['price']:.2f}"
     return pick["price"], f"{pick['label']} ${pick['price']:.2f}"
 
 
@@ -4960,7 +4998,7 @@ def pick_structure_stop_short(d1: dict, entry: float, setup_kind: str = "current
 def collect_reward_targets_long(
     d1: dict, bars: list[dict], entry: float, tl: dict,
 ) -> list[tuple[float, str, str]]:
-    """Reward candidates above entry: structural resistance only (no UTL/DTL TP)."""
+    """Reward candidates above entry from 關鍵 S/R resistance zones."""
     targets: list[tuple[float, str, str]] = []
     seen: set[float] = set()
 
@@ -4970,17 +5008,9 @@ def collect_reward_targets_long(
             seen.add(p)
             targets.append((p, ttype, label))
 
-    for lv in collect_structural_resistance_levels(d1):
-        ttype = "wave_top" if "前浪頂" in lv["label"] else "structure"
+    for lv in key_sr_levels_above(d1, bars, entry):
+        ttype = "structure" if "band" in lv["label"].lower() else "wave_top"
         add(lv["price"], ttype, f"{lv['label']} ${lv['price']:.2f}")
-
-    if bars:
-        highs, _ = find_swing_points_indexed(bars, 60)
-        if len(highs) >= 2:
-            p2 = round(highs[-2][1], 2)
-            if p2 not in seen and p2 > entry * 1.003:
-                seen.add(p2)
-                targets.append((p2, "wave_top", f"D1 前浪頂(2) ${p2:.2f}"))
 
     return targets
 
@@ -5083,7 +5113,7 @@ def build_rr_plan(
         targets = collect_reward_targets_short(d1, bars or [], c, {})
         best = _best_reward_target(targets, c, risk, "short")
         raw_rr = best["raw_rr"]
-        stop_kl = resolve_stop_keylevel(d1, stop, setup_kind) or stop_reason.split(" $")[0]
+        stop_kl = resolve_stop_keylevel(d1, stop, setup_kind, bars) or stop_reason.split(" $")[0]
         tp2_kl = resolve_tp2_keylevel(d1, best["type"], best["label"])
         return {
             "preferred": "breakdown" if not d1["sr_pass"] else "retest",
@@ -5105,7 +5135,7 @@ def build_rr_plan(
             "direction": "short",
         }
 
-    stop, stop_reason = pick_structure_stop(d1, c, setup_kind)
+    stop, stop_reason = pick_structure_stop(d1, c, setup_kind, bars)
     risk = c - stop
     if risk <= 0:
         return _empty_rr_plan()
@@ -5114,7 +5144,7 @@ def build_rr_plan(
     best = _best_reward_target(targets, c, risk, "long")
     raw_rr = best["raw_rr"]
     preferred = "retest" if d1.get("retest_as_support") else ("breakout" if not d1["sr_pass"] else "retest")
-    stop_kl = resolve_stop_keylevel(d1, stop, setup_kind) or stop_reason.split(" $")[0]
+    stop_kl = resolve_stop_keylevel(d1, stop, setup_kind, bars) or stop_reason.split(" $")[0]
     tp2_kl = resolve_tp2_keylevel(d1, best["type"], best["label"])
 
     return {
@@ -5782,107 +5812,131 @@ def score_symbol(
     )
 
 
-def _resolve_breakout_entry(d1: dict) -> tuple[float, str, str, str]:
-    """Next breakout level: W1 wave top first, then merged W1+D1+H1 resistance pool."""
+def _resolve_breakout_entry(d1: dict, bars: list[dict] | None = None) -> tuple[float, str, str, str]:
+    """Next breakout: nearest 關鍵 S/R resistance above close."""
     close = d1["close"]
+    resistances = key_sr_levels_above(d1, bars, close)
+    if not resistances:
+        return 0, "", "", "無有效突破位（關鍵 S/R 阻力已破或無下一層）"
+
+    pick = resistances[0]
+    entry = pick["price"]
+    entry_kl = pick["label"]
+    trigger = f"收市站穩 >${entry:.2f}（{entry_kl}）+ 放量"
     wt_tf = d1.get("wave_top_tf") or "D1"
     wt = d1.get("wave_top") or 0
-    if wt > close * 1.003:
-        entry_kl = f"{wt_tf} 前浪頂"
-        trigger = f"收市站穩 >${wt:.2f}（{entry_kl}）+ 放量"
-        return round(wt, 2), entry_kl, trigger, ""
-
-    resistances = collect_structural_resistance_levels(d1)
-    unbroken = [r for r in resistances if r["price"] > close * 1.003]
-    if not unbroken:
-        if d1.get("retest_as_support") and wt > 0:
-            entry_kl = f"{wt_tf} 前浪頂（阻力→支持）"
-            trigger = f"回踩 ${wt:.2f}（{entry_kl}）企穩再突破"
-            note = f"⚠ {wt_tf} 前浪頂已突破；等 role-reversal 企穩後再追"
-            return round(wt, 2), entry_kl, trigger, note
-        return 0, "", "", "無有效突破位（阻力已破且無下一結構）"
-
-    unbroken.sort(key=lambda r: (r["priority"], r["price"]))
-    pick = unbroken[0]
-    entry_kl = pick["label"]
-    trigger = f"收市站穩 >${pick['price']:.2f}（{entry_kl}）+ 放量"
-    note = f"⚠ {wt_tf} 前浪頂 ${wt:.2f} 已突破；改睇下一阻力" if wt else ""
-    return round(pick["price"], 2), entry_kl, trigger, note
+    note = ""
+    if wt and wt < close and entry > wt * 1.003:
+        note = f"⚠ {wt_tf} 前浪頂 ${wt:.2f} 已突破；改睇下一關鍵阻力"
+    return round(entry, 2), entry_kl, trigger, note
 
 
-def _resolve_retest_entry(d1: dict) -> tuple[float, str, str, str, str]:
-    area = d1.get("trading_area") or {}
-    zone_lo = area.get("zone_lo") or d1["swing_low"]
-    zone_hi = area.get("zone_hi") or d1.get("ema20") or zone_lo
-    ptf = area.get("primary_tf") or d1.get("wave_bottom_tf") or "D1"
-    sources = area.get("sources") or []
-    src_hint = "+".join(
-        _format_sr_keylevel_label(s, "support", ptf) for s in sources[:3]
-    ) or "支撐區"
-    span_pct = (zone_hi - zone_lo) / zone_lo if zone_lo else 0
-    if span_pct > 0.01:
+def _resolve_retest_entry(d1: dict, bars: list[dict] | None = None) -> tuple[float, str, str, str, str]:
+    """Retest: nearest 關鍵 S/R support below close."""
+    close = d1["close"]
+    supports = key_sr_levels_below(d1, bars, close)
+    if not supports:
+        supports = key_sr_levels_below(d1, bars, close * 1.05)
+    if not supports:
+        zone_lo = d1["swing_low"]
+        zone_hi = d1.get("ema20") or zone_lo
         entry = round((zone_lo + zone_hi) / 2, 2)
+        return entry, "D1 20日低區", f"回落至 ${zone_lo:.2f} 企穩", f"無明確關鍵 S/R 支持；參考 ${entry:.2f}", ""
+
+    pick = supports[0]
+    zlo = pick.get("zone_lo") or pick["price"]
+    zhi = pick.get("zone_hi") or pick["price"]
+    span_pct = (zhi - zlo) / zlo if zlo else 0
+    if span_pct > 0.01:
+        entry = round((zlo + zhi) / 2, 2)
         anchor = "中位"
     else:
-        entry = round(zone_lo, 2)
+        entry = round(zlo, 2)
         anchor = "下沿"
-    entry_kl = f"Multiple edge {anchor}（{src_hint}）"
-    trigger = (
-        f"回落 Multiple edge area ${zone_lo:.2f}–${zone_hi:.2f}（{src_hint}）"
-        f"企穩 @ ${entry:.2f}"
-    )
-    retest_note = f"優先等 ${zone_lo:.2f}–${zone_hi:.2f} 企穩；入場參考 {anchor} ${entry:.2f}"
-    return entry, entry_kl, trigger, retest_note, src_hint
+    entry_kl = pick["label"]
+    trigger = f"回落 {format_area_range(zlo, zhi)}（{entry_kl}）企穩 @ ${entry:.2f}"
+    retest_note = f"優先等 {format_area_range(zlo, zhi)} 企穩；入場參考 {anchor} ${entry:.2f}"
+    return entry, entry_kl, trigger, retest_note, entry_kl
+
+
+def _make_setup_dict(
+    *,
+    name: str,
+    trigger: str,
+    entry_kl: str,
+    entry: float,
+    plan: dict,
+    valid: bool,
+    retest_note: str = "",
+    setup_note: str = "",
+) -> dict:
+    out = {
+        "name": name,
+        "trigger": trigger or "—",
+        "entry_label": entry_kl or "Entry",
+        "entry_keylevel": entry_kl,
+        "entry": entry,
+        "stop": plan.get("stop"),
+        "tp1": plan.get("tp1"),
+        "tp2": plan.get("tp2"),
+        "rr": plan.get("raw_rr"),
+        "stop_reason": plan.get("stop_reason", ""),
+        "stop_keylevel": plan.get("stop_keylevel", ""),
+        "tp1_keylevel": plan.get("tp1_keylevel", "1R 量度目標"),
+        "tp2_keylevel": plan.get("tp2_keylevel", ""),
+        "reward_target_label": plan.get("reward_target_label", ""),
+        "valid": valid,
+    }
+    if retest_note:
+        out["retest_note"] = retest_note
+    if setup_note:
+        out["setup_note"] = setup_note
+    return out
 
 
 def build_setups(d1: dict, bars: list[dict] | None = None) -> dict:
-    """Two watch setups: breakout and retest (structure stop + logical reward targets)."""
-    entry_a, entry_kl_a, trigger_a, note_a = _resolve_breakout_entry(d1)
-    plan_a = build_rr_plan(d1, bars, entry=entry_a, setup_kind="breakout", direction="long") if entry_a else _empty_rr_plan()
-    setup_a = {
-        "name": "突破 Breakout",
-        "trigger": trigger_a or "—",
-        "entry_label": entry_kl_a or "Breakout trigger",
-        "entry_keylevel": entry_kl_a,
-        "entry": entry_a,
-        "stop": plan_a["stop"],
-        "tp1": plan_a["tp1"],
-        "tp2": plan_a["tp2"],
-        "rr": plan_a["raw_rr"],
-        "stop_reason": plan_a.get("stop_reason", ""),
-        "stop_keylevel": plan_a.get("stop_keylevel", ""),
-        "tp1_keylevel": plan_a.get("tp1_keylevel", "1R 量度目標"),
-        "tp2_keylevel": plan_a.get("tp2_keylevel", ""),
-        "reward_target_label": plan_a.get("reward_target_label", ""),
-        "valid": bool(entry_a and plan_a.get("stop") and plan_a["raw_rr"] >= 2),
-    }
-    if note_a:
-        setup_a["setup_note"] = note_a
-    elif d1.get("retest_as_support") and entry_a:
-        wt_tf = d1.get("wave_top_tf") or "D1"
-        setup_a["setup_note"] = f"下位已突破前浪頂（阻力→支持）；A = 升破 {entry_kl_a}"
+    """Watch setups: 現價 + breakout + retest（關鍵 S/R stop/TP）。"""
+    close = round(d1["close"], 2)
+    plan_c = build_rr_plan(d1, bars, entry=close, setup_kind="current", direction="long")
+    setup_c = _make_setup_dict(
+        name="現價 Current",
+        trigger=f"現價收市 @ ${close:.2f}",
+        entry_kl="現價收市",
+        entry=close,
+        plan=plan_c,
+        valid=bool(plan_c.get("stop") and plan_c.get("raw_rr", 0) >= 2),
+    )
 
-    entry_b, entry_kl_b, trigger_b, retest_note, src_hint = _resolve_retest_entry(d1)
+    entry_a, entry_kl_a, trigger_a, note_a = _resolve_breakout_entry(d1, bars)
+    plan_a = (
+        build_rr_plan(d1, bars, entry=entry_a, setup_kind="breakout", direction="long")
+        if entry_a else _empty_rr_plan()
+    )
+    setup_a = _make_setup_dict(
+        name="突破 Breakout",
+        trigger=trigger_a,
+        entry_kl=entry_kl_a or "Breakout trigger",
+        entry=entry_a,
+        plan=plan_a,
+        valid=bool(entry_a and plan_a.get("stop") and plan_a.get("raw_rr", 0) >= 2),
+        setup_note=note_a or (
+            f"下位已突破前浪頂（阻力→支持）；A = 升破 {entry_kl_a}"
+            if d1.get("retest_as_support") and entry_a else ""
+        ),
+    )
+
+    entry_b, entry_kl_b, trigger_b, retest_note, _ = _resolve_retest_entry(d1, bars)
     plan_b = build_rr_plan(d1, bars, entry=entry_b, setup_kind="retest", direction="long")
-    setup_b = {
-        "name": "回踩 Retest",
-        "trigger": trigger_b,
-        "entry_label": entry_kl_b,
-        "entry_keylevel": entry_kl_b,
-        "retest_note": retest_note,
-        "entry": entry_b,
-        "stop": plan_b["stop"],
-        "tp1": plan_b["tp1"],
-        "tp2": plan_b["tp2"],
-        "rr": plan_b["raw_rr"],
-        "stop_reason": plan_b.get("stop_reason", ""),
-        "stop_keylevel": plan_b.get("stop_keylevel", ""),
-        "tp1_keylevel": plan_b.get("tp1_keylevel", "1R 量度目標"),
-        "tp2_keylevel": plan_b.get("tp2_keylevel", ""),
-        "reward_target_label": plan_b.get("reward_target_label", ""),
-        "valid": bool(plan_b.get("stop") and plan_b["raw_rr"] >= 2),
-    }
-    return {"breakout": setup_a, "retest": setup_b}
+    setup_b = _make_setup_dict(
+        name="回踩 Retest",
+        trigger=trigger_b,
+        entry_kl=entry_kl_b,
+        entry=entry_b,
+        plan=plan_b,
+        valid=bool(plan_b.get("stop") and plan_b.get("raw_rr", 0) >= 2),
+        retest_note=retest_note,
+    )
+    return {"current": setup_c, "breakout": setup_a, "retest": setup_b}
 
 
 SCREENER_MIN_BEST_RR = 3.0
@@ -5928,7 +5982,7 @@ def attach_setup_edge_overviews(
     mi_source_tf: str,
     cross: dict,
 ) -> dict:
-    """Add edge_overview per Setup A/B price (for 3-table dashboard in format_md)."""
+    """Add edge_overview per Setup 現價/A/B price (for dashboard in format_md)."""
 
     def _tf_overview_at_price(price: float) -> dict[str, dict]:
         out: dict[str, dict] = {}
@@ -5945,7 +5999,7 @@ def attach_setup_edge_overviews(
             out[tf_label] = build_per_tf_block(tf_label, sim_analysis, sim, **cross)
         return out
 
-    for key in ("breakout", "retest"):
+    for key in ("current", "breakout", "retest"):
         s = setups.get(key)
         if not s or not s.get("entry"):
             continue
@@ -6140,7 +6194,11 @@ def format_combined_edge_dashboard(
         _edge_overview_html_table("現價（D1 主評）", timeframes),
     ]
     setups = setups or {}
-    for key, label in (("breakout", "Setup A 突破"), ("retest", "Setup B 回踩")):
+    for key, label in (
+        ("current", "Setup 現價"),
+        ("breakout", "Setup A 突破"),
+        ("retest", "Setup B 回踩"),
+    ):
         s = setups.get(key) or {}
         overview = s.get("edge_overview")
         entry = s.get("entry")
@@ -6438,13 +6496,17 @@ def format_watch_setups(setups: dict) -> list[str]:
     if not setups:
         return []
     lines = [
-        "## Watch 兩個 Setup",
+        "## Watch Setup（現價 + A/B）",
         "",
-        "> Setup A/B **Entry、Stop、TP、RR 各自獨立**（W1 > D1 > H1 影響力；Stop/TP/Entry 睇齊 W1+D1+H1 結構價：浪頂底、MA、填補裂口）。A = 突破下一阻力；B = 等回踩支持。",
-        "> Stop / TP 行顯示 **結構 key level 名稱**（價位 + 類型；TP1 = 1R 量度）。",
+        "> **現價 / Setup A / B** 各自獨立 Entry、Stop、TP、RR；全部用 **關鍵 S/R 水平**（W1 pivot band + 匯聚區）。",
+        "> A = 突破下一關鍵阻力；B = 回踩下一關鍵支持；現價 = 而家入場參考。",
         "",
     ]
-    for key, title in (("breakout", "Setup A — 突破（優先）"), ("retest", "Setup B — 回踩")):
+    for key, title in (
+        ("current", "Setup 現價 — 而家入場"),
+        ("breakout", "Setup A — 突破（優先）"),
+        ("retest", "Setup B — 回踩"),
+    ):
         s = setups.get(key, {})
         if not s:
             continue
@@ -6585,7 +6647,6 @@ def format_md(data: dict) -> str:
     if tfs:
         lines.extend(format_combined_edge_dashboard(tfs, setups))
         lines.extend(format_watch_setups(setups))
-        lines.extend(format_channel_reference_section(data.get("channel_ref")))
         if d1_analysis := data.get("d1_analysis"):
             lines.extend(format_sr_key_levels_section(d1_analysis, bars=data.get("d1_bars")))
         lines.extend(format_price_scenarios(data))
