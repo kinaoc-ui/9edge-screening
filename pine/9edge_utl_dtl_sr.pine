@@ -1,0 +1,7 @@
+// DEPRECATED — use 9edge_sr_bands.pine for S/R (matches Python CVCO logic).
+// UTL/DTL: draw manually on chart.
+// This file kept as pointer only.
+
+//@version=5
+indicator("9edge S/R (use 9edge_sr_bands)", overlay=true)
+plot(na, title="Open pine/9edge_sr_bands.pine in Pine Editor", display=display.none)

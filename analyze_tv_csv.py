@@ -14,7 +14,7 @@ import argparse
 import csv
 import re
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -783,13 +783,38 @@ def merge_swing_sr(
         if sr_tf.get("pass"):
             any_pass = True
 
+    pivot_bands: list[dict] = []
+    if w1_bars:
+        pivot_bands = compute_pivot_sr_bands(w1_bars)
+        merged["pivot_sr_bands"] = pivot_bands
+        for band in pivot_bands:
+            tag = f"W1:{band['label']}"
+            if band["side"] == "support":
+                all_support.append((tag, band["price"]))
+            else:
+                all_resistance.append((tag, band["price"]))
+    else:
+        merged["pivot_sr_bands"] = []
+
     zone = cluster_support_zone(all_support, price)
     d1_sr = analyze_sr(d1_bars, tf_label="D1")
     at_confluence = zone and zone["edge_count"] >= 2 and zone["dist_pct"] <= SR_CONFLUENCE_DIST_PCT
-    sr_pass = at_confluence or any_retest or d1_sr["pass"]
+    near_pivot = nearest_pivot_band_at_price(pivot_bands, price)
+    at_pivot_support = (
+        near_pivot is not None
+        and near_pivot.get("side") == "support"
+        and price_near_pivot_zone(price, near_pivot)
+    )
+    pivot_sr_pass = at_pivot_support and near_pivot.get("touches", 0) >= SR_MIN_TOUCHES
+    sr_pass = at_confluence or any_retest or d1_sr["pass"] or pivot_sr_pass
 
     primary_tf = merged.get("wave_bottom_tf") or "D1"
-    if at_confluence:
+    if pivot_sr_pass and near_pivot:
+        merge_note = (
+            f"Swing S&R W1 {near_pivot['label']} "
+            f"${near_pivot['zone_lo']:.2f}–${near_pivot['zone_hi']:.2f}"
+        )
+    elif at_confluence:
         src = "+".join(zone["sources"][:5])
         merge_note = f"Swing S&R（{primary_tf}主導）Multiple edge ${zone['zone_lo']}-{zone['zone_hi']}（{zone['edge_count']}源:{src}）"
     elif any_retest:
@@ -800,7 +825,16 @@ def merge_swing_sr(
         merge_note = f"Swing S&R（{primary_tf}前浪底${merged.get('wave_bottom', d1.get('wave_bottom', 0)):.2f}）| {d1_sr['note']}"
 
     area = dict(d1.get("trading_area") or {})
-    if zone and at_confluence:
+    if pivot_sr_pass and near_pivot:
+        area.update({
+            "type": "pivot_sr",
+            "zone_lo": near_pivot["zone_lo"],
+            "zone_hi": near_pivot["zone_hi"],
+            "edge_count": near_pivot.get("touches", SR_MIN_TOUCHES),
+            "sources": [f"W1 {near_pivot['label']}"],
+            "primary_tf": "W1",
+        })
+    elif zone and at_confluence:
         area.update({
             "type": "confluence",
             "zone_lo": zone["zone_lo"],
@@ -2929,6 +2963,13 @@ def assess_bm_pillar_sr_long(d1: dict) -> tuple[int, str]:
 
 
 def assess_bm_pillar_sr_short(d1: dict, bars: list[dict]) -> tuple[int, str]:
+    bands = d1.get("pivot_sr_bands") or []
+    near_res = nearest_pivot_band_at_price(bands, d1["close"], side="resistance")
+    if near_res and price_near_pivot_zone(d1["close"], near_res):
+        return 1, (
+            f"W1 {near_res['label']} "
+            f"${near_res['zone_lo']:.2f}–${near_res['zone_hi']:.2f}"
+        )
     sr_s = analyze_sr_short(bars)
     if sr_s["pass"]:
         return 1, sr_s["note"]
@@ -3145,8 +3186,388 @@ def project_trendline(p1: tuple[int, float], p2: tuple[int, float], target_idx: 
     return v1 + slope * (target_idx - i1)
 
 
+CHANNEL_LOOKBACK_W1 = 80
+CHANNEL_RECENT_W1 = 50
+CHANNEL_PROJECT_W1 = 12
+
+PIVOT_LEFT_BARS = 10
+PIVOT_RIGHT_BARS = 10
+ATR_PERIOD = 14
+SR_ATR_BAND_MULT = 0.2
+SR_MIN_TOUCHES = 3
+
+
+def compute_atr_series(bars: list[dict], period: int = ATR_PERIOD) -> list[float]:
+    """Wilder-style ATR (SMA of true range for each bar)."""
+    if not bars:
+        return []
+    trs: list[float] = []
+    for i, bar in enumerate(bars):
+        if i == 0:
+            tr = bar["high"] - bar["low"]
+        else:
+            prev = bars[i - 1]
+            tr = max(
+                bar["high"] - bar["low"],
+                abs(bar["high"] - prev["close"]),
+                abs(bar["low"] - prev["close"]),
+            )
+        trs.append(tr)
+    return sma(trs, period)
+
+
+def find_pivot_points_indexed(
+    bars: list[dict],
+    *,
+    left: int = PIVOT_LEFT_BARS,
+    right: int = PIVOT_RIGHT_BARS,
+    use_close: bool = False,
+) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    """
+    TradingView-style pivot highs / lows (Left Bars + Right Bars confirmation).
+    Near the chart end, Right Bars shrinks so recent swings can still confirm.
+    use_close=True: pivot on close (UTL/DTL); False: high/low wicks (S/R).
+    """
+    n = len(bars)
+    if n < left + 2:
+        return [], []
+    highs: list[tuple[int, float]] = []
+    lows: list[tuple[int, float]] = []
+    for i in range(left, n):
+        eff_right = min(right, n - 1 - i)
+        seg = bars[i - left : i + eff_right + 1]
+        if use_close:
+            px = bars[i]["close"]
+            closes = [b["close"] for b in seg]
+            if px >= max(closes):
+                highs.append((i, px))
+            if px <= min(closes):
+                lows.append((i, px))
+        else:
+            hi = bars[i]["high"]
+            lo = bars[i]["low"]
+            if hi >= max(b["high"] for b in seg):
+                highs.append((i, hi))
+            if lo <= min(b["low"] for b in seg):
+                lows.append((i, lo))
+    return highs, lows
+
+
+def linear_regression_at(points: list[tuple[int, float]], target_idx: int) -> float:
+    """Project price at target_idx through pivot chain (2-point line or OLS)."""
+    if not points:
+        return 0.0
+    if len(points) == 1:
+        return points[0][1]
+    if len(points) == 2:
+        return project_trendline(points[0], points[1], target_idx)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    n = len(points)
+    x_mean = sum(xs) / n
+    y_mean = sum(ys) / n
+    num = sum((xs[k] - x_mean) * (ys[k] - y_mean) for k in range(n))
+    den = sum((xs[k] - x_mean) ** 2 for k in range(n))
+    if den == 0:
+        return y_mean
+    slope = num / den
+    intercept = y_mean - slope * x_mean
+    return intercept + slope * target_idx
+
+
+def _best_consecutive_chain(
+    points: list[tuple[int, float]],
+    *,
+    rising: bool,
+    min_len: int = 2,
+) -> list[tuple[int, float]] | None:
+    """Longest time-ordered chain of higher lows (UTL) or lower highs (DTL)."""
+    if len(points) < min_len:
+        return None
+    sorted_pts = sorted(points, key=lambda p: p[0])
+    best: list[tuple[int, float]] = []
+    for start in range(len(sorted_pts)):
+        chain = [sorted_pts[start]]
+        for j in range(start + 1, len(sorted_pts)):
+            nxt = sorted_pts[j]
+            if rising and nxt[1] > chain[-1][1]:
+                chain.append(nxt)
+            elif not rising and nxt[1] < chain[-1][1]:
+                chain.append(nxt)
+        if len(chain) >= min_len and (
+            len(chain) > len(best)
+            or (
+                len(chain) == len(best)
+                and (
+                    chain[-1][0] > best[-1][0]
+                    or (
+                        chain[-1][0] == best[-1][0]
+                        and (chain[0][1] < best[0][1] if rising else chain[0][1] > best[0][1])
+                    )
+                )
+            )
+        ):
+            best = chain
+    return best if len(best) >= min_len else None
+
+
+def _trendline_from_pivot_chain(
+    chain: list[tuple[int, float]],
+    *,
+    last_idx: int,
+    project_bars: int,
+    times: list[int] | None,
+    line_type: str,
+) -> dict:
+    fut_idx = last_idx + project_bars
+    p1, p2 = chain[0], chain[-1]
+    line_now = project_trendline(p1, p2, last_idx)
+    line_future = project_trendline(p1, p2, fut_idx)
+    span = p2[0] - p1[0]
+    slope = (p2[1] - p1[1]) / span if span else 0.0
+    return {
+        "type": line_type,
+        "p1": p1,
+        "p2": p2,
+        "chain": chain,
+        "chain_len": len(chain),
+        "slope_per_bar": round(slope, 4),
+        "line_now": round(line_now, 2),
+        "line_future": round(line_future, 2),
+        "project_bars": project_bars,
+        "future_idx": fut_idx,
+        "future_date": _bar_date_label(fut_idx, times),
+        "p1_date": _bar_date_label(p1[0], times),
+        "p2_date": _bar_date_label(p2[0], times),
+    }
+
+
+def _cluster_pivot_prices(
+    prices: list[float], tol: float,
+) -> list[list[float]]:
+    """Greedy cluster pivot prices within ATR tolerance."""
+    if not prices or tol <= 0:
+        return []
+    clusters: list[list[float]] = []
+    for price in sorted(prices):
+        placed = False
+        for cluster in clusters:
+            center = sum(cluster) / len(cluster)
+            if abs(price - center) <= tol:
+                cluster.append(price)
+                placed = True
+                break
+        if not placed:
+            clusters.append([price])
+    return clusters
+
+
+def _count_bar_touches(
+    bars: list[dict], center: float, tol: float, *, kind: str,
+) -> int:
+    count = 0
+    for bar in bars:
+        if kind == "resistance" and abs(bar["high"] - center) <= tol:
+            count += 1
+        elif kind == "support" and abs(bar["low"] - center) <= tol:
+            count += 1
+    return count
+
+
+def compute_pivot_sr_bands(
+    bars: list[dict],
+    *,
+    left: int = PIVOT_LEFT_BARS,
+    right: int = PIVOT_RIGHT_BARS,
+    atr_mult: float = SR_ATR_BAND_MULT,
+    min_touches: int = SR_MIN_TOUCHES,
+    max_bands: int = 8,
+) -> list[dict]:
+    """
+    Strong horizontal S/R bands: pivot highs/lows (L/R bars) clustered within
+    ATR×atr_mult; band valid when pivot count or bar touches >= min_touches.
+    """
+    if len(bars) < left + right + 3:
+        return []
+    atr_series = compute_atr_series(bars)
+    atr = atr_series[-1] if atr_series else bars[-1]["high"] - bars[-1]["low"]
+    tol = max(atr * atr_mult, bars[-1]["close"] * 0.002)
+    close = bars[-1]["close"]
+
+    pivot_highs, pivot_lows = find_pivot_points_indexed(bars, left=left, right=right)
+    bands: list[dict] = []
+
+    for kind, pivots in (("resistance", pivot_highs), ("support", pivot_lows)):
+        prices = [p[1] for p in pivots]
+        for cluster in _cluster_pivot_prices(prices, tol):
+            if len(cluster) < min_touches:
+                center = sum(cluster) / len(cluster)
+                touches = _count_bar_touches(bars, center, tol, kind=kind)
+                if touches < min_touches:
+                    continue
+            else:
+                center = sum(cluster) / len(cluster)
+                touches = max(len(cluster), _count_bar_touches(bars, center, tol, kind=kind))
+            zlo = min(cluster) - tol * 0.15
+            zhi = max(cluster) + tol * 0.15
+            label = (
+                f"{'R' if kind == 'resistance' else 'S'} band "
+                f"({touches} touches, ATRx{atr_mult})"
+            )
+            bands.append({
+                "kind": "zone",
+                "side": kind,
+                "price": round(center, 2),
+                "zone_lo": round(zlo, 2),
+                "zone_hi": round(zhi, 2),
+                "touches": touches,
+                "pivot_count": len(cluster),
+                "label": label,
+                "tf": "W1",
+                "rank": 0 if kind == "resistance" else 1,
+            })
+
+    bands.sort(key=lambda b: abs(b["price"] - close))
+    # De-overlap nearby bands
+    kept: list[dict] = []
+    for band in bands:
+        if len(kept) >= max_bands:
+            break
+        zlo, zhi = band["zone_lo"], band["zone_hi"]
+        if any(
+            not (zhi + zlo * 0.02 < k["zone_lo"] or zlo - zlo * 0.02 > k["zone_hi"])
+            for k in kept
+        ):
+            continue
+        kept.append(band)
+    return kept
+
+
+def pivot_sr_bands_to_tv_shapes(
+    bands: list[dict],
+    times: list[int],
+    *,
+    close: float | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Convert pivot S/R bands to TradingView rectangle specs."""
+    if not bands or not times:
+        return [], []
+    ref_close = close if close is not None else bands[0]["price"]
+    green = '{"linecolor": "#26a69a", "linewidth": 2, "backgroundColor": "rgba(38,166,154,0.28)"}'
+    red = '{"linecolor": "#ef5350", "linewidth": 2, "backgroundColor": "rgba(239,83,80,0.28)"}'
+
+    def pt(idx: int, price: float) -> dict:
+        if idx < 0:
+            idx = len(times) + idx
+        i = max(0, min(idx, len(times) - 1))
+        return {"time": times[i], "price": round(price, 2)}
+
+    shapes: list[dict] = []
+    for band in bands:
+        zlo, zhi = band["zone_lo"], band["zone_hi"]
+        style = green if zhi < ref_close else red
+        shapes.append({
+            "shape": "rectangle",
+            "point": pt(0, zlo),
+            "point2": pt(-1, zhi),
+            "overrides": style,
+            "label": band["label"],
+        })
+    return shapes, bands
+
+
+def price_near_pivot_zone(
+    price: float,
+    band: dict,
+    dist_pct: float = SR_CONFLUENCE_DIST_PCT,
+) -> bool:
+    """True if price inside band or within dist_pct of zone edge."""
+    zlo, zhi = band["zone_lo"], band["zone_hi"]
+    if zlo <= price <= zhi:
+        return True
+    if price <= 0:
+        return False
+    if price < zlo:
+        return (zlo - price) / price <= dist_pct
+    return (price - zhi) / price <= dist_pct
+
+
+def nearest_pivot_band_at_price(
+    bands: list[dict],
+    price: float,
+    *,
+    side: str | None = None,
+    dist_pct: float = SR_CONFLUENCE_DIST_PCT,
+) -> dict | None:
+    best: dict | None = None
+    best_dist = float("inf")
+    for band in bands:
+        if side and band.get("side") != side:
+            continue
+        zlo, zhi = band["zone_lo"], band["zone_hi"]
+        if price < zlo:
+            d = zlo - price
+        elif price > zhi:
+            d = price - zhi
+        else:
+            d = 0.0
+        rel = d / price if price else 0.0
+        if rel <= dist_pct and rel < best_dist:
+            best_dist = rel
+            best = band
+    return best
+
+
+def pivot_band_to_area(band: dict, role: str) -> dict:
+    zlo, zhi = band["zone_lo"], band["zone_hi"]
+    mid = band["price"]
+    touches = band.get("touches", SR_MIN_TOUCHES)
+    side_label = "支持" if band.get("side") == "support" else "阻力"
+    label = band.get("label") or f"{side_label} band"
+    return {
+        "zone_lo": zlo,
+        "zone_hi": zhi,
+        "mid": mid,
+        "edge_count": touches,
+        "sources": [f"W1 {label}"],
+        "levels": [{"price": mid, "label": f"W1 {label}", "tf": "W1"}],
+        "anchor": mid,
+        "pivot_band": True,
+        "role": role,
+        "area_label": (
+            f"{side_label}區 ${zlo:.2f}–${zhi:.2f}"
+            f"（W1 pivot {touches} touches）"
+        ),
+    }
+
+
+def pivot_bands_to_areas(
+    bands: list[dict],
+    close: float,
+    role: str,
+) -> list[dict]:
+    """W1 pivot S/R bands as scenario areas (below/above close)."""
+    out: list[dict] = []
+    for band in bands:
+        if role == "support" and band.get("side") != "support":
+            continue
+        if role == "resistance" and band.get("side") != "resistance":
+            continue
+        zlo, zhi = band["zone_lo"], band["zone_hi"]
+        if role == "support" and zhi > close * 0.999:
+            continue
+        if role == "resistance" and zlo < close * 1.001:
+            continue
+        if role == "support" and (close - zhi) / close > SUPPORT_AREA_MAX_DIST_PCT:
+            continue
+        if role == "resistance" and (zlo - close) / close > RESISTANCE_AREA_MAX_DIST_PCT:
+            continue
+        out.append(pivot_band_to_area(band, role))
+    return sorted(out, key=lambda a: abs(a["mid"] - close))
+
+
 def compute_trendline_levels(bars: list[dict], lookback: int = 60) -> dict:
-    """UTL (rising swing lows) and DTL (falling swing highs) at last bar."""
+    """Legacy single-line UTL/DTL at last bar (kept for backward compat)."""
     if len(bars) < 10:
         return {}
     highs, lows = find_swing_points_indexed(bars, lookback)
@@ -3160,6 +3581,832 @@ def compute_trendline_levels(bars: list[dict], lookback: int = 60) -> dict:
         out["dtl_anchor"] = highs[-2][1]
         out["dtl_pts"] = (highs[-2], highs[-1])
     return out
+
+
+def _bar_date_label(idx: int, times: list[int] | None) -> str:
+    if times and 0 <= idx < len(times):
+        return datetime.fromtimestamp(times[idx]).strftime("%Y-%m-%d")
+    return f"bar {idx}"
+
+
+def _bar_time_at_index(idx: int, times: list[int]) -> int:
+    """Map bar index to unix time; extrapolate forward when idx >= len(times)."""
+    if not times:
+        return 0
+    if 0 <= idx < len(times):
+        return times[idx]
+    step = times[-1] - times[-2] if len(times) >= 2 else 7 * 24 * 3600
+    return times[-1] + step * (idx - (len(times) - 1))
+
+
+def _parallel_rail(lower_p1: tuple[int, float], lower_p2: tuple[int, float], target_idx: int) -> float:
+    return project_trendline(lower_p1, lower_p2, target_idx)
+
+
+def compute_ascending_channel(
+    bars: list[dict],
+    *,
+    lookback: int = CHANNEL_LOOKBACK_W1,
+    recent_bars: int = CHANNEL_RECENT_W1,
+    project_bars: int = CHANNEL_PROJECT_W1,
+    times: list[int] | None = None,
+) -> dict | None:
+    """
+    W1-style ascending parallel channel:
+    - UTL (lower rail) through two rising swing lows
+    - Upper rail parallel through the best swing high after the second low
+    - Extension = upper rail projected forward by project_bars (time, not 2× measured move)
+    """
+    if len(bars) < 10:
+        return None
+    highs, lows = find_swing_points_indexed(bars, lookback)
+    if not highs or not lows:
+        return None
+
+    last_idx = len(bars) - 1
+    cutoff = max(0, last_idx - recent_bars)
+    recent_highs = [hv for hv in highs if hv[0] >= cutoff]
+    recent_lows = [lv for lv in lows if lv[0] >= cutoff]
+    if len(recent_lows) < 2:
+        return None
+
+    anchor_hi = max(recent_highs, key=lambda hv: hv[1]) if recent_highs else None
+    if anchor_hi:
+        pre_peak_lows = [lv for lv in recent_lows if lv[0] < anchor_hi[0]]
+        if len(pre_peak_lows) >= 2:
+            p2 = max(pre_peak_lows, key=lambda lv: lv[0])
+            candidates = [lv for lv in pre_peak_lows if lv[0] < p2[0] and lv[1] < p2[1]]
+            in_range = [lv for lv in candidates if 6 <= p2[0] - lv[0] <= 15]
+            if in_range:
+                p1 = min(in_range, key=lambda lv: lv[0])
+            elif candidates:
+                p1 = min(candidates, key=lambda lv: lv[0])
+            else:
+                p1 = None
+            if p1:
+                slope = (p2[1] - p1[1]) / (p2[0] - p1[0])
+                utl_at_hi = p1[1] + slope * (anchor_hi[0] - p1[0])
+                width = anchor_hi[1] - utl_at_hi
+                if width > 0:
+                    fut_idx = last_idx + project_bars
+                    utl_now = _parallel_rail(p1, p2, last_idx)
+                    upper_now = utl_now + width
+                    utl_future = _parallel_rail(p1, p2, fut_idx)
+                    upper_future = utl_future + width
+                    return {
+                        "type": "ascending",
+                        "utl_p1": p1,
+                        "utl_p2": p2,
+                        "upper_anchor": anchor_hi,
+                        "channel_width": round(width, 2),
+                        "slope_per_bar": round(slope, 4),
+                        "utl_now": round(utl_now, 2),
+                        "upper_now": round(upper_now, 2),
+                        "utl_future": round(utl_future, 2),
+                        "upper_future": round(upper_future, 2),
+                        "project_bars": project_bars,
+                        "future_idx": fut_idx,
+                        "future_date": _bar_date_label(fut_idx, times),
+                        "utl_p1_date": _bar_date_label(p1[0], times),
+                        "utl_p2_date": _bar_date_label(p2[0], times),
+                        "upper_anchor_date": _bar_date_label(anchor_hi[0], times),
+                    }
+
+    best: dict | None = None
+    best_key: tuple = ()
+    for i in range(len(recent_lows)):
+        for j in range(i + 1, len(recent_lows)):
+            p1, p2 = recent_lows[i], recent_lows[j]
+            if p2[1] <= p1[1]:
+                continue
+            slope = (p2[1] - p1[1]) / (p2[0] - p1[0])
+            hi_pool = [h for h in highs if h[0] >= p2[0]]
+            if not hi_pool:
+                continue
+            anchor_hi = max(hi_pool, key=lambda h: h[1])
+            utl_at_hi = p1[1] + slope * (anchor_hi[0] - p1[0])
+            width = anchor_hi[1] - utl_at_hi
+            if width <= 0:
+                continue
+
+            fut_idx = last_idx + project_bars
+            utl_now = _parallel_rail(p1, p2, last_idx)
+            upper_now = utl_now + width
+            utl_future = _parallel_rail(p1, p2, fut_idx)
+            upper_future = utl_future + width
+
+            key = (anchor_hi[1], p2[0] - p1[0], -p1[0])
+            if key > best_key:
+                best_key = key
+                best = {
+                    "type": "ascending",
+                    "utl_p1": p1,
+                    "utl_p2": p2,
+                    "upper_anchor": anchor_hi,
+                    "channel_width": round(width, 2),
+                    "slope_per_bar": round(slope, 4),
+                    "utl_now": round(utl_now, 2),
+                    "upper_now": round(upper_now, 2),
+                    "utl_future": round(utl_future, 2),
+                    "upper_future": round(upper_future, 2),
+                    "project_bars": project_bars,
+                    "future_idx": fut_idx,
+                    "future_date": _bar_date_label(fut_idx, times),
+                    "utl_p1_date": _bar_date_label(p1[0], times),
+                    "utl_p2_date": _bar_date_label(p2[0], times),
+                    "upper_anchor_date": _bar_date_label(anchor_hi[0], times),
+                }
+    return best
+
+
+def compute_descending_channel(
+    bars: list[dict],
+    *,
+    lookback: int = CHANNEL_LOOKBACK_W1,
+    recent_bars: int = CHANNEL_RECENT_W1,
+    project_bars: int = CHANNEL_PROJECT_W1,
+    times: list[int] | None = None,
+) -> dict | None:
+    """
+    Descending parallel channel (DTL reference):
+    - DTL (upper rail) through two falling swing highs
+    - Lower rail parallel through the deepest swing low after the second high
+    - Extension = lower rail projected forward by project_bars
+    """
+    if len(bars) < 10:
+        return None
+    highs, lows = find_swing_points_indexed(bars, lookback)
+    if not highs or not lows:
+        return None
+
+    last_idx = len(bars) - 1
+    cutoff = max(0, last_idx - recent_bars)
+    recent_highs = [hv for hv in highs if hv[0] >= cutoff]
+    if len(recent_highs) < 2:
+        return None
+
+    def _build_descending(p1: tuple[int, float], p2: tuple[int, float]) -> dict | None:
+        if p2[1] >= p1[1]:
+            return None
+        slope = (p2[1] - p1[1]) / (p2[0] - p1[0])
+        lo_pool = [lv for lv in lows if lv[0] >= p2[0]]
+        if not lo_pool:
+            return None
+        anchor_lo = min(lo_pool, key=lambda lv: lv[1])
+        dtl_at_lo = p1[1] + slope * (anchor_lo[0] - p1[0])
+        width = dtl_at_lo - anchor_lo[1]
+        if width <= 0:
+            return None
+        fut_idx = last_idx + project_bars
+        dtl_now = _parallel_rail(p1, p2, last_idx)
+        lower_now = dtl_now - width
+        dtl_future = _parallel_rail(p1, p2, fut_idx)
+        lower_future = dtl_future - width
+        return {
+            "type": "descending",
+            "dtl_p1": p1,
+            "dtl_p2": p2,
+            "lower_anchor": anchor_lo,
+            "channel_width": round(width, 2),
+            "slope_per_bar": round(slope, 4),
+            "dtl_now": round(dtl_now, 2),
+            "lower_now": round(lower_now, 2),
+            "dtl_future": round(dtl_future, 2),
+            "lower_future": round(lower_future, 2),
+            "project_bars": project_bars,
+            "future_idx": fut_idx,
+            "future_date": _bar_date_label(fut_idx, times),
+            "dtl_p1_date": _bar_date_label(p1[0], times),
+            "dtl_p2_date": _bar_date_label(p2[0], times),
+            "lower_anchor_date": _bar_date_label(anchor_lo[0], times),
+        }
+
+    # Prefer peak → lower-high DTL (post-crash bearish structure)
+    peak = max(recent_highs, key=lambda hv: hv[1])
+    after_peak = [hv for hv in recent_highs if hv[0] > peak[0] and hv[1] < peak[1]]
+    if after_peak:
+        p2 = max(after_peak, key=lambda hv: hv[0])
+        built = _build_descending(peak, p2)
+        if built:
+            return built
+
+    best: dict | None = None
+    best_key: tuple = ()
+    for i in range(len(recent_highs)):
+        for j in range(i + 1, len(recent_highs)):
+            p1, p2 = recent_highs[i], recent_highs[j]
+            built = _build_descending(p1, p2)
+            if not built:
+                continue
+            anchor_lo = built["lower_anchor"]
+            key = (p1[1] - anchor_lo[1], p2[0] - p1[0], -p1[0])
+            if key > best_key:
+                best_key = key
+                best = built
+    return best
+
+
+def _local_swing_highs_after(
+    bars: list[dict], after_idx: int, *, use_close: bool = False,
+) -> list[tuple[int, float]]:
+    """3-bar swing highs strictly after after_idx (for post-peak DTL anchors)."""
+    out: list[tuple[int, float]] = []
+    key = "close" if use_close else "high"
+    for i in range(after_idx + 1, len(bars) - 1):
+        px = bars[i][key]
+        if px >= bars[i - 1][key] and px >= bars[i + 1][key]:
+            out.append((i, px))
+    return out
+
+
+def _local_swing_lows_after(
+    bars: list[dict], after_idx: int, *, use_close: bool = False,
+) -> list[tuple[int, float]]:
+    """3-bar swing lows strictly after after_idx."""
+    out: list[tuple[int, float]] = []
+    key = "close" if use_close else "low"
+    for i in range(after_idx + 1, len(bars) - 1):
+        px = bars[i][key]
+        if px <= bars[i - 1][key] and px <= bars[i + 1][key]:
+            out.append((i, px))
+    return out
+
+
+def _post_peak_crash_trough_idx(
+    bars: list[dict], peak_idx: int, *, window: int = 15,
+) -> int | None:
+    """Deepest close in the first `window` bars after peak (immediate crash, not later pullbacks)."""
+    start = peak_idx + 1
+    end = min(len(bars), start + window)
+    if start >= end:
+        return None
+    return min(range(start, end), key=lambda i: bars[i]["close"])
+
+
+def _scope_utl_pool(
+    pool: list[tuple[int, float]], bars: list[dict] | None = None,
+) -> list[tuple[int, float]]:
+    """UTL: only pivots from the recent structural base (lowest pivot) forward."""
+    if not pool:
+        return pool
+    base = min(pool, key=lambda p: p[1])
+    scoped = [p for p in pool if p[0] >= base[0]]
+    if bars and len(scoped) < 2:
+        extra = _local_swing_lows_after(bars, base[0], use_close=True)
+        merged = {p[0]: p for p in scoped}
+        for pt in extra:
+            merged[pt[0]] = pt
+        scoped = sorted(merged.values(), key=lambda p: p[0])
+    return scoped
+
+
+def _chain_from_peak_lower_highs(
+    pivot_highs: list[tuple[int, float]],
+    bars: list[dict] | None = None,
+    *,
+    use_close: bool = False,
+) -> list[tuple[int, float]] | None:
+    """DTL: highest close pivot peak, then lower highs after post-crash trough."""
+    if len(pivot_highs) < 1:
+        return None
+    peak = max(pivot_highs, key=lambda h: h[1])
+    crash_idx = _post_peak_crash_trough_idx(bars, peak[0]) if bars else None
+    after: list[tuple[int, float]] = [
+        h for h in pivot_highs if h[0] > peak[0]
+    ]
+    if bars:
+        after.extend(_local_swing_highs_after(bars, peak[0], use_close=use_close))
+    by_idx: dict[int, float] = {}
+    for idx, price in after:
+        by_idx[idx] = max(by_idx.get(idx, 0), price)
+    after_sorted = sorted(by_idx.items(), key=lambda x: x[0])
+    chain = [peak]
+    for idx, price in after_sorted:
+        if crash_idx is not None and idx < crash_idx:
+            continue
+        if price < chain[-1][1]:
+            chain.append((idx, price))
+    return chain if len(chain) >= 2 else None
+
+
+def _chain_ending_latest(
+    points: list[tuple[int, float]], *, rising: bool, min_len: int = 2,
+) -> list[tuple[int, float]] | None:
+    """UTL/DTL fallback: walk back from the latest pivot to build a valid chain."""
+    if len(points) < min_len:
+        return None
+    ordered = sorted(points, key=lambda p: p[0])
+    end = ordered[-1]
+    chain = [end]
+    for pt in reversed(ordered[:-1]):
+        if rising and pt[1] < chain[-1][1]:
+            chain.append(pt)
+        elif not rising and pt[1] > chain[-1][1]:
+            chain.append(pt)
+    chain.reverse()
+    return chain if len(chain) >= min_len else None
+
+
+def compute_utl_trendline(
+    bars: list[dict],
+    *,
+    lookback: int = CHANNEL_LOOKBACK_W1,
+    recent_bars: int = CHANNEL_RECENT_W1,
+    project_bars: int = CHANNEL_PROJECT_W1,
+    times: list[int] | None = None,
+    pivot_left: int = PIVOT_LEFT_BARS,
+    pivot_right: int = PIVOT_RIGHT_BARS,
+) -> dict | None:
+    """
+    UTL: consecutive higher pivot lows on close (L/R bars), extended via line or OLS.
+    """
+    if len(bars) < pivot_left + pivot_right + 3:
+        return None
+    _, pivot_lows = find_pivot_points_indexed(
+        bars, left=pivot_left, right=pivot_right, use_close=True,
+    )
+    if len(pivot_lows) < 2:
+        return None
+
+    last_idx = len(bars) - 1
+    cutoff = max(0, last_idx - max(recent_bars, lookback))
+    recent = [lv for lv in pivot_lows if lv[0] >= cutoff]
+    pool = recent if len(recent) >= 2 else pivot_lows
+    scoped = _scope_utl_pool(pool, bars)
+
+    chain = _chain_ending_latest(scoped, rising=True, min_len=2)
+    if not chain:
+        chain = _best_consecutive_chain(scoped, rising=True, min_len=2)
+    if not chain:
+        return None
+    return _trendline_from_pivot_chain(
+        chain, last_idx=last_idx, project_bars=project_bars,
+        times=times, line_type="utl",
+    )
+
+
+def compute_dtl_trendline(
+    bars: list[dict],
+    *,
+    lookback: int = CHANNEL_LOOKBACK_W1,
+    recent_bars: int = CHANNEL_RECENT_W1,
+    project_bars: int = CHANNEL_PROJECT_W1,
+    times: list[int] | None = None,
+    pivot_left: int = PIVOT_LEFT_BARS,
+    pivot_right: int = PIVOT_RIGHT_BARS,
+) -> dict | None:
+    """
+    DTL: consecutive lower pivot highs on close (L/R bars), extended via line or OLS.
+    """
+    if len(bars) < pivot_left + pivot_right + 3:
+        return None
+    pivot_highs, _ = find_pivot_points_indexed(
+        bars, left=pivot_left, right=pivot_right, use_close=True,
+    )
+    if len(pivot_highs) < 2:
+        return None
+
+    last_idx = len(bars) - 1
+    cutoff = max(0, last_idx - max(recent_bars, lookback))
+    recent = [hv for hv in pivot_highs if hv[0] >= cutoff]
+    pool = recent if len(recent) >= 2 else pivot_highs
+
+    chain = _chain_from_peak_lower_highs(pool, bars, use_close=True)
+    if not chain:
+        chain = _chain_ending_latest(pool, rising=False, min_len=2)
+    if not chain:
+        chain = _best_consecutive_chain(pool, rising=False, min_len=2)
+    if not chain:
+        return None
+    return _trendline_from_pivot_chain(
+        chain, last_idx=last_idx, project_bars=project_bars,
+        times=times, line_type="dtl",
+    )
+
+
+def _pick_channel_primary(
+    w1_bars: list[dict],
+    ascending: dict | None,
+    descending: dict | None,
+) -> str:
+    """Pick UTL vs DTL from recent swing structure (lower highs → DTL)."""
+    if descending and not ascending:
+        return "descending"
+    if ascending and not descending:
+        return "ascending"
+    if not ascending and not descending:
+        return "none"
+
+    highs, lows = find_swing_points_indexed(w1_bars, CHANNEL_LOOKBACK_W1)
+    last_idx = len(w1_bars) - 1
+    cutoff = max(0, last_idx - CHANNEL_RECENT_W1)
+    recent_highs = sorted([h for h in highs if h[0] >= cutoff], key=lambda h: h[0])
+    recent_lows = sorted([lv for lv in lows if lv[0] >= cutoff], key=lambda lv: lv[0])
+    close = w1_bars[-1]["close"]
+
+    if len(recent_highs) >= 2 and recent_highs[-1][1] < recent_highs[-2][1] * 0.995:
+        return "descending"
+
+    if recent_highs:
+        peak = max(recent_highs, key=lambda h: h[1])
+        if peak[1] > close * 1.12 and peak[0] < last_idx - 3:
+            return "descending"
+
+    if len(recent_lows) >= 2 and recent_lows[-1][1] < recent_lows[-2][1] * 0.995:
+        return "descending"
+
+    return "ascending"
+
+
+def compute_w1_channel_reference(
+    w1_bars: list[dict],
+    *,
+    times: list[int] | None = None,
+    project_bars: int = CHANNEL_PROJECT_W1,
+) -> dict:
+    """W1 parallel channel reference for chart display (not Setup TP)."""
+    ascending = compute_ascending_channel(
+        w1_bars, times=times, project_bars=project_bars,
+    )
+    descending = compute_descending_channel(
+        w1_bars, times=times, project_bars=project_bars,
+    )
+    primary = _pick_channel_primary(w1_bars, ascending, descending)
+    utl_line = compute_utl_trendline(
+        w1_bars, times=times, project_bars=project_bars,
+    )
+    dtl_line = compute_dtl_trendline(
+        w1_bars, times=times, project_bars=project_bars,
+    )
+    return {
+        "tf": "W1",
+        "primary": primary,
+        "ascending": ascending,
+        "descending": descending,
+        "utl_line": utl_line,
+        "dtl_line": dtl_line,
+    }
+
+
+def channel_ref_to_tv_shapes(
+    channel_ref: dict,
+    times: list[int],
+    *,
+    draw_parallel_channels: bool = False,
+) -> list[dict]:
+    """
+    Convert W1 channel reference to TradingView draw_shape specs.
+
+    Default: simple UTL (green) + DTL (orange/red) trendlines — each 2 segments
+    (solid p1→today, dashed forward extension). Parallel channel rails only when
+    draw_parallel_channels=True.
+    """
+    if not channel_ref or not times:
+        return []
+
+    green = '{"linecolor": "#26A69A", "linewidth": 2, "linestyle": 0}'
+    green_dash = '{"linecolor": "#26A69A", "linewidth": 2, "linestyle": 2}'
+    red = '{"linecolor": "#F44336", "linewidth": 2, "linestyle": 0}'
+    red_dash = '{"linecolor": "#F44336", "linewidth": 2, "linestyle": 2}'
+    blue = '{"linecolor": "#2962FF", "linewidth": 2, "linestyle": 0}'
+    blue_dash = '{"linecolor": "#2962FF", "linewidth": 2, "linestyle": 2}'
+    orange = '{"linecolor": "#FF9800", "linewidth": 2, "linestyle": 0}'
+    orange_dash = '{"linecolor": "#FF9800", "linewidth": 2, "linestyle": 2}'
+
+    def pt(idx: int, price: float) -> dict:
+        return {"time": _bar_time_at_index(idx, times), "price": round(price, 2)}
+
+    def trendline_segments(
+        p1: tuple[int, float],
+        p2: tuple[int, float],
+        fut_idx: int,
+        fut_price: float,
+        *,
+        solid_style: str,
+        dash_style: str,
+        label_prefix: str,
+        chain: list[tuple[int, float]] | None = None,
+    ) -> list[dict]:
+        """Solid p1→today (through p2), dashed extension forward in time."""
+        last_idx = len(times) - 1
+        solid_end = max(p2[0], last_idx)
+        y_solid_end = project_trendline(p1, p2, solid_end)
+        return [
+            {
+                "shape": "trend_line",
+                "point": pt(p1[0], p1[1]),
+                "point2": pt(solid_end, y_solid_end),
+                "overrides": solid_style,
+                "label": f"{label_prefix} p1→today",
+            },
+            {
+                "shape": "trend_line",
+                "point": pt(solid_end, y_solid_end),
+                "point2": pt(fut_idx, fut_price),
+                "overrides": dash_style,
+                "label": f"{label_prefix} extend",
+            },
+        ]
+
+    shapes: list[dict] = []
+
+    utl = channel_ref.get("utl_line")
+    if utl:
+        p1, p2 = utl["p1"], utl["p2"]
+        shapes.extend(
+            trendline_segments(
+                p1, p2, utl["future_idx"], utl["line_future"],
+                solid_style=green, dash_style=green_dash,
+                label_prefix="UTL",
+                chain=utl.get("chain"),
+            )
+        )
+
+    dtl = channel_ref.get("dtl_line")
+    if dtl:
+        p1, p2 = dtl["p1"], dtl["p2"]
+        shapes.extend(
+            trendline_segments(
+                p1, p2, dtl["future_idx"], dtl["line_future"],
+                solid_style=red, dash_style=red_dash,
+                label_prefix="DTL",
+                chain=dtl.get("chain"),
+            )
+        )
+
+    if not draw_parallel_channels:
+        return shapes
+
+    asc = channel_ref.get("ascending")
+    desc = channel_ref.get("descending")
+
+    if asc:
+        p1, p2 = asc["utl_p1"], asc["utl_p2"]
+        width = asc["channel_width"]
+        fut = asc["future_idx"]
+        upper_p1 = p1[1] + width
+        upper_p2 = p2[1] + width
+        solid_end = max(p2[0], len(times) - 1)
+        upper_solid_end = project_trendline(
+            (p1[0], upper_p1), (p2[0], upper_p2), solid_end,
+        )
+        shapes.extend(
+            trendline_segments(
+                p1, p2, fut, asc["utl_future"],
+                solid_style=blue, dash_style=blue_dash,
+                label_prefix="UTL lower",
+            )
+        )
+        shapes.extend([
+            {
+                "shape": "trend_line",
+                "point": pt(p1[0], upper_p1),
+                "point2": pt(solid_end, upper_solid_end),
+                "overrides": blue,
+                "label": "UTL upper p1→today",
+            },
+            {
+                "shape": "trend_line",
+                "point": pt(solid_end, upper_solid_end),
+                "point2": pt(fut, asc["upper_future"]),
+                "overrides": blue_dash,
+                "label": "UTL upper extend",
+            },
+        ])
+
+    if desc:
+        p1, p2 = desc["dtl_p1"], desc["dtl_p2"]
+        width = desc["channel_width"]
+        fut = desc["future_idx"]
+        lower_p1 = p1[1] - width
+        lower_p2 = p2[1] - width
+        solid_end = max(p2[0], len(times) - 1)
+        lower_solid_end = project_trendline(
+            (p1[0], lower_p1), (p2[0], lower_p2), solid_end,
+        )
+        shapes.extend(
+            trendline_segments(
+                p1, p2, fut, desc["dtl_future"],
+                solid_style=orange, dash_style=orange_dash,
+                label_prefix="DTL upper",
+            )
+        )
+        shapes.extend([
+            {
+                "shape": "trend_line",
+                "point": pt(p1[0], lower_p1),
+                "point2": pt(solid_end, lower_solid_end),
+                "overrides": orange,
+                "label": "DTL lower p1→today",
+            },
+            {
+                "shape": "trend_line",
+                "point": pt(solid_end, lower_solid_end),
+                "point2": pt(fut, desc["lower_future"]),
+                "overrides": orange_dash,
+                "label": "DTL lower extend",
+            },
+        ])
+
+    return shapes
+
+
+SR_DRAW_DEDUP_PCT = 0.035
+SR_DRAW_MAX_ZONES = 8
+
+
+def _zones_overlap(
+    zlo: float, zhi: float, blo: float, bhi: float, tol_pct: float = SR_DRAW_DEDUP_PCT,
+) -> bool:
+    pad_lo = min(zlo, blo) * tol_pct
+    return not (zhi + pad_lo < blo or zlo - pad_lo > bhi)
+
+
+def collect_sr_draw_levels(
+    d1: dict,
+    bars: list[dict] | None = None,
+    *,
+    max_levels: int = SR_DRAW_MAX_ZONES,
+) -> list[dict]:
+    """
+    S/R for TradingView — nearby levels merged into areas (zones), not many单线.
+    """
+    c = d1["close"]
+    items: list[dict] = []
+    spans: list[tuple[float, float]] = []
+
+    def try_add(item: dict) -> bool:
+        zlo = round(item.get("zone_lo") or item["price"], 2)
+        zhi = round(item.get("zone_hi") or item["price"], 2)
+        if zhi < zlo:
+            zlo, zhi = zhi, zlo
+        if zhi <= zlo * 1.0005:
+            zhi = zlo * 1.005
+        for blo, bhi in spans:
+            if _zones_overlap(zlo, zhi, blo, bhi):
+                return False
+        spans.append((zlo, zhi))
+        item = {**item, "zone_lo": zlo, "zone_hi": zhi, "kind": "zone"}
+        items.append(item)
+        return True
+
+    # Primary: W1 pivot S/R bands (same logic as Pine / draw_utl_dtl_tv)
+    for band in sorted(
+        d1.get("pivot_sr_bands") or [],
+        key=lambda b: abs(b["price"] - c),
+    ):
+        if len(items) >= max_levels:
+            break
+        side = "R" if band.get("side") == "resistance" else "S"
+        touches = band.get("touches", SR_MIN_TOUCHES)
+        try_add({
+            "price": band["price"],
+            "zone_lo": band["zone_lo"],
+            "zone_hi": band["zone_hi"],
+            "label": f"W1 {side} band ({touches} touches)",
+            "tf": "W1",
+            "rank": 0,
+        })
+
+    if len(items) >= max_levels:
+        return items[:max_levels]
+
+    area = d1.get("trading_area") or {}
+    zlo = area.get("zone_lo") or 0
+    zhi = area.get("zone_hi") or zlo
+    if zlo > 0:
+        ptf = area.get("primary_tf") or "D1"
+        ec = area.get("edge_count") or 0
+        src = " / ".join((area.get("sources") or [])[:2])
+        lbl = f"{ptf} Multiple edge ({ec}源:{src})" if ec >= 2 else f"{ptf} Trading area"
+        try_add({"price": (zlo + zhi) / 2, "label": lbl, "tf": ptf, "rank": 0})
+
+    for area_obj in sorted(
+        build_resistance_areas(d1, bars=bars),
+        key=lambda a: (-(a.get("edge_count") or 0), a["zone_hi"]),
+    ):
+        if len(items) >= max_levels:
+            break
+        try_add({
+            "price": area_obj["mid"],
+            "label": area_obj.get("area_label") or f"阻力區 {format_area_range(area_obj['zone_lo'], area_obj['zone_hi'])}",
+            "tf": "D1",
+            "rank": 1,
+        })
+
+    for area_obj in sorted(
+        build_support_areas(d1, bars=bars),
+        key=lambda a: (-(a.get("edge_count") or 0), -a["zone_lo"]),
+    ):
+        if len(items) >= max_levels:
+            break
+        try_add({
+            "price": area_obj["mid"],
+            "label": area_obj.get("area_label") or f"支持區 {format_area_range(area_obj['zone_lo'], area_obj['zone_hi'])}",
+            "tf": "D1",
+            "rank": 1,
+        })
+
+    for tf_key, px_key, base_lbl in (
+        ("wave_top_tf", "wave_top", "前浪頂"),
+        ("wave_bottom_tf", "wave_bottom", "前浪底"),
+    ):
+        if len(items) >= max_levels:
+            break
+        ptf = d1.get(tf_key) or "D1"
+        px = d1.get(px_key) or 0
+        if px and ptf == "W1":
+            try_add({
+                "price": px,
+                "label": f"{ptf} {base_lbl}",
+                "tf": ptf,
+                "rank": 2,
+            })
+
+    resist_60 = d1.get("resistance") or 0
+    if resist_60 and len(items) < max_levels:
+        try_add({
+            "price": resist_60,
+            "label": "W1 60日高",
+            "tf": "W1",
+            "rank": 2,
+        })
+
+    return items[:max_levels]
+
+
+def analyze_sr_merged(
+    d1_bars: list[dict],
+    *,
+    w1_bars: list[dict] | None = None,
+    h1_bars: list[dict] | None = None,
+) -> tuple[dict, dict | None, dict | None]:
+    """Minimal analyze_bars + merge_swing_sr path for S/R drawing (no RS/MTF)."""
+    d1 = analyze_bars(d1_bars)
+    w1 = analyze_bars(w1_bars) if w1_bars else None
+    h1 = analyze_bars(h1_bars) if h1_bars else None
+    d1 = merge_swing_sr(d1, d1_bars, w1=w1, w1_bars=w1_bars, h1=h1, h1_bars=h1_bars)
+    return d1, w1, h1
+
+
+def _prices_near_pct(a: float, b: float, tol_pct: float = SR_DRAW_DEDUP_PCT) -> bool:
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) / min(a, b) <= tol_pct
+
+
+def sr_levels_to_tv_shapes(
+    d1: dict,
+    times: list[int],
+    *,
+    bars: list[dict] | None = None,
+    max_levels: int = 15,
+) -> tuple[list[dict], list[dict]]:
+    """Convert merged D1 S/R analysis to TradingView draw_shape specs + level list."""
+    if not times:
+        return [], []
+
+    levels = collect_sr_draw_levels(d1, bars=bars, max_levels=max_levels)
+    if not levels:
+        return [], []
+
+    green = '{"linecolor": "#26a69a", "linewidth": 1, "backgroundColor": "rgba(38,166,154,0.12)"}'
+    red = '{"linecolor": "#ef5350", "linewidth": 1, "backgroundColor": "rgba(239,83,80,0.12)"}'
+
+    def pt(idx: int, price: float) -> dict:
+        if idx < 0:
+            idx = len(times) + idx
+        i = max(0, min(idx, len(times) - 1))
+        return {"time": times[i], "price": round(price, 2)}
+
+    shapes: list[dict] = []
+    for lv in levels:
+        zlo, zhi = lv["zone_lo"], lv["zone_hi"]
+        style = green if zhi < d1["close"] else red
+        shapes.append({
+            "shape": "rectangle",
+            "point": pt(0, zlo),
+            "point2": pt(-1, zhi),
+            "overrides": style,
+            "label": lv["label"],
+        })
+
+    return shapes, levels
+
+
+def format_sr_key_levels_section(d1: dict, bars: list[dict] | None = None) -> list[str]:
+    """Key S/R levels for report (alongside W1 channel reference)."""
+    levels = collect_sr_draw_levels(d1, bars=bars, max_levels=10)
+    if not levels:
+        return []
+    lines = ["### 關鍵 S/R 水平（圖表用）", ""]
+    for lv in levels:
+        if lv["kind"] == "zone":
+            lines.append(f"- **{lv['label']}**：{format_area_range(lv['zone_lo'], lv['zone_hi'])}")
+        else:
+            lines.append(f"- **{lv['label']}**：${lv['price']:.2f}")
+    lines.append("")
+    return lines
 
 
 def _price_matches(a: float, b: float, tol: float = 0.02) -> bool:
@@ -3198,7 +4445,7 @@ def _format_sr_keylevel_label(src: str, role: str = "support", default_tf: str =
 
 
 def collect_structural_support_levels(d1: dict) -> list[dict]:
-    """Structural supports from W1+D1+H1 (MA, gap, swing, trading area)."""
+    """Structural supports from W1 pivot bands + D1/H1 (MA, gap, swing)."""
     levels: list[dict] = []
     seen: set[float] = set()
 
@@ -3213,6 +4460,11 @@ def collect_structural_support_levels(d1: dict) -> list[dict]:
             "tf": tf,
             "priority": TF_PRIORITY.get(tf, 9),
         })
+
+    for band in d1.get("pivot_sr_bands") or []:
+        if band.get("side") != "support":
+            continue
+        add(band["price"], f"W1 {band['label']}", "W1")
 
     area = d1.get("trading_area") or {}
     zone_lo = area.get("zone_lo") or 0
@@ -3420,7 +4672,11 @@ def build_support_areas(
             continue
         valid.append(area)
     valid.extend(flipped)
-    valid = _dedupe_areas(valid)
+    pivot_areas = [
+        a for a in pivot_bands_to_areas(d1.get("pivot_sr_bands") or [], c, "support")
+        if not bars or area_support_valid(bars, a)
+    ]
+    valid = _dedupe_areas(pivot_areas + valid)
 
     for area in valid:
         area["role"] = "support"
@@ -3485,7 +4741,11 @@ def build_resistance_areas(
             continue
         valid.append(area)
     valid.extend(flipped)
-    valid = _dedupe_areas(valid)
+    pivot_areas = [
+        a for a in pivot_bands_to_areas(d1.get("pivot_sr_bands") or [], c, "resistance")
+        if not bars or area_resistance_valid(bars, a)
+    ]
+    valid = _dedupe_areas(pivot_areas + valid)
 
     for area in valid:
         area["role"] = "resistance"
@@ -3510,7 +4770,7 @@ def find_area_for_price(price: float, areas: list[dict], tol: float = 0.03) -> d
 
 
 def collect_structural_resistance_levels(d1: dict) -> list[dict]:
-    """Structural resistances from W1+D1+H1 (MA, gap, swing)."""
+    """Structural resistances from W1 pivot bands + D1/H1 (MA, gap, swing)."""
     levels: list[dict] = []
     seen: set[float] = set()
 
@@ -3525,6 +4785,11 @@ def collect_structural_resistance_levels(d1: dict) -> list[dict]:
             "tf": tf,
             "priority": TF_PRIORITY.get(tf, 9),
         })
+
+    for band in d1.get("pivot_sr_bands") or []:
+        if band.get("side") != "resistance":
+            continue
+        add(band["price"], f"W1 {band['label']}", "W1")
 
     for src, price in d1.get("all_resistance_sources") or []:
         tf, _ = _parse_tf_source(src)
@@ -3675,7 +4940,7 @@ def pick_structure_stop_short(d1: dict, entry: float, setup_kind: str = "current
 def collect_reward_targets_long(
     d1: dict, bars: list[dict], entry: float, tl: dict,
 ) -> list[tuple[float, str, str]]:
-    """Reward candidates above entry: multi-TF resistance + UTL/DTL."""
+    """Reward candidates above entry: structural resistance only (no UTL/DTL TP)."""
     targets: list[tuple[float, str, str]] = []
     seen: set[float] = set()
 
@@ -3697,26 +4962,13 @@ def collect_reward_targets_long(
                 seen.add(p2)
                 targets.append((p2, "wave_top", f"D1 前浪頂(2) ${p2:.2f}"))
 
-    utl = tl.get("utl")
-    if utl and utl < entry:
-        channel = entry - utl
-        if channel > 0:
-            add(entry + channel * 2, "UTL", f"UTL 通道延伸 ${entry + channel * 2:.2f}")
-
-    dtl = tl.get("dtl")
-    if dtl and entry >= dtl * 0.998:
-        seg_low = d1.get("wave_bottom") or d1["swing_low"]
-        anchor = tl.get("dtl_anchor", dtl)
-        move = entry + max(anchor - seg_low, entry - dtl)
-        add(move, "DTL", f"DTL 突破量度 ${move:.2f}")
-
     return targets
 
 
 def collect_reward_targets_short(
     d1: dict, bars: list[dict], entry: float, tl: dict,
 ) -> list[tuple[float, str, str]]:
-    """Reward candidates below entry for short bias."""
+    """Reward candidates below entry: structural support only (no UTL/DTL TP)."""
     targets: list[tuple[float, str, str]] = []
     seen: set[float] = set()
 
@@ -3737,18 +4989,6 @@ def collect_reward_targets_short(
 
     swing_lo = d1["swing_low"]
     add(swing_lo, "wave_top", f"20日低 ${swing_lo:.2f}")
-
-    dtl = tl.get("dtl")
-    if dtl and entry <= dtl * 1.002:
-        seg_hi = d1.get("wave_top") or d1["resistance"]
-        move = entry - max(seg_hi - dtl, dtl - entry)
-        add(move, "DTL", f"DTL跌破量度 ${move:.2f}")
-
-    utl = tl.get("utl")
-    if utl and entry < utl:
-        channel = utl - entry
-        if channel > 0:
-            add(entry - channel * 2, "UTL", f"UTL跌破延伸 ${entry - channel * 2:.2f}")
 
     return targets
 
@@ -3807,11 +5047,11 @@ def build_rr_plan(
     direction: str = "long",
 ) -> dict:
     """
-    M.E.T.A. RR plan: structure stop + logical reward (wave top / UTL / DTL).
+    M.E.T.A. RR plan: structure stop + structural reward (wave top / resistance).
+    UTL/DTL channel levels are chart reference only — not Setup TP targets.
     Pass edge when raw_rr >= 2; aim for 5:1 when structure allows.
     """
     c = entry if entry is not None else d1["close"]
-    tl = compute_trendline_levels(bars) if bars else {}
 
     if direction == "short":
         stop, stop_reason = pick_structure_stop_short(d1, c, setup_kind)
@@ -3820,7 +5060,7 @@ def build_rr_plan(
             plan = _empty_rr_plan()
             plan["direction"] = "short"
             return plan
-        targets = collect_reward_targets_short(d1, bars or [], c, tl)
+        targets = collect_reward_targets_short(d1, bars or [], c, {})
         best = _best_reward_target(targets, c, risk, "short")
         raw_rr = best["raw_rr"]
         stop_kl = resolve_stop_keylevel(d1, stop, setup_kind) or stop_reason.split(" $")[0]
@@ -3850,7 +5090,7 @@ def build_rr_plan(
     if risk <= 0:
         return _empty_rr_plan()
 
-    targets = collect_reward_targets_long(d1, bars or [], c, tl)
+    targets = collect_reward_targets_long(d1, bars or [], c, {})
     best = _best_reward_target(targets, c, risk, "long")
     raw_rr = best["raw_rr"]
     preferred = "retest" if d1.get("retest_as_support") else ("breakout" if not d1["sr_pass"] else "retest")
@@ -4387,6 +5627,7 @@ def score_from_bars(
     board_short_note = market["short_note"]
     sector_footnote = fetch_sector_footnote(sym)
     plan = build_rr_plan(d1, bars)
+    channel_ref = compute_w1_channel_reference(w1_bars) if w1_bars else None
 
     cross = dict(
         mtf_long=mtf_pass,
@@ -4480,8 +5721,11 @@ def score_from_bars(
         "grade": grade,
         "decision": decision,
         "entry_plan": plan,
+        "channel_ref": channel_ref,
         "setups": setups,
         "scenarios": scenarios,
+        "d1_analysis": d1,
+        "d1_bars": bars,
         "directional_bias": scenarios["bias"],
         "long_edge_count": scenarios["current_long"],
         "short_edge_count": scenarios["current_short"],
@@ -5010,6 +6254,60 @@ def format_broad_market_section(market: dict) -> list[str]:
     return lines
 
 
+def format_channel_reference_section(channel_ref: dict | None) -> list[str]:
+    """W1 UTL/DTL parallel channel — chart reference only, not Setup TP."""
+    if not channel_ref:
+        return []
+    asc = channel_ref.get("ascending")
+    desc = channel_ref.get("descending")
+    primary = channel_ref.get("primary", "none")
+    if primary == "ascending":
+        desc = None
+    elif primary == "descending":
+        asc = None
+    if not asc and not desc:
+        return []
+
+    lines = [
+        "## W1 UTL / DTL 參考（圖表用，唔做 Setup TP）",
+        "",
+        "> 平行通道：下軌 UTL 連兩個遞升 swing low，上軌平行過浪頂；"
+        "延伸 = 上軌向前投射（週數），唔係 Entry+2×量度。",
+        "",
+    ]
+    if asc:
+        p1, p2 = asc["utl_p1"], asc["utl_p2"]
+        hi = asc["upper_anchor"]
+        lines += [
+            "### 上升通道（UTL）",
+            "",
+            f"- **下軌 anchor 1**：${p1[1]:.2f}（{asc.get('utl_p1_date', p1[0])}）",
+            f"- **下軌 anchor 2**：${p2[1]:.2f}（{asc.get('utl_p2_date', p2[0])}）",
+            f"- **上軌 anchor**：${hi[1]:.2f}（{asc.get('upper_anchor_date', hi[0])}）",
+            f"- **通道闊度**：${asc['channel_width']:.2f}",
+            f"- **今日下軌 / 上軌**：${asc['utl_now']:.2f} / ${asc['upper_now']:.2f}",
+            f"- **上軌延伸 +{asc['project_bars']}W**（約 {asc.get('future_date', '—')}）："
+            f" **${asc['upper_future']:.2f}**",
+            "",
+        ]
+    if desc:
+        p1, p2 = desc["dtl_p1"], desc["dtl_p2"]
+        lo = desc["lower_anchor"]
+        lines += [
+            "### 下降通道（DTL）",
+            "",
+            f"- **上軌 anchor 1**：${p1[1]:.2f}（{desc.get('dtl_p1_date', p1[0])}）",
+            f"- **上軌 anchor 2**：${p2[1]:.2f}（{desc.get('dtl_p2_date', p2[0])}）",
+            f"- **下軌 anchor**：${lo[1]:.2f}（{desc.get('lower_anchor_date', lo[0])}）",
+            f"- **通道闊度**：${desc['channel_width']:.2f}",
+            f"- **今日上軌 / 下軌**：${desc['dtl_now']:.2f} / ${desc['lower_now']:.2f}",
+            f"- **下軌延伸 +{desc['project_bars']}W**（約 {desc.get('future_date', '—')}）："
+            f" **${desc['lower_future']:.2f}**",
+            "",
+        ]
+    return lines
+
+
 def format_rr_section(plan: dict) -> list[str]:
     """Edge #6 R&R&S — M.E.T.A. (entry + stop + reward must align)."""
     if not plan.get("entry"):
@@ -5033,7 +6331,8 @@ def format_rr_section(plan: dict) -> list[str]:
         f"| Raw RR | **{plan.get('raw_rr', plan['rr'])}:1** {icon} |",
         f"| 評語 | {plan.get('discounted_note', '—')} |",
         "",
-        "目標優先序：前浪頂 → UTL 通道延伸 → DTL 突破量度；止損優先序：Trading area low → 前浪底 → 20日低。",
+        "目標優先序：前浪頂 / 60日阻力 / 結構位（UTL/DTL 通道僅圖表參考，唔做 Setup TP）；"
+        "止損優先序：Trading area low → 前浪底 → 20日低。",
         "",
     ]
     return lines
@@ -5228,6 +6527,9 @@ def format_md(data: dict) -> str:
     if tfs:
         lines.extend(format_combined_edge_dashboard(tfs, setups))
         lines.extend(format_watch_setups(setups))
+        lines.extend(format_channel_reference_section(data.get("channel_ref")))
+        if d1_analysis := data.get("d1_analysis"):
+            lines.extend(format_sr_key_levels_section(d1_analysis, bars=data.get("d1_bars")))
         lines.extend(format_price_scenarios(data))
         if mtf := data.get("mtf_detail"):
             lines.extend(format_mtf_section(mtf))

@@ -1,0 +1,163 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © 9edge — mirrors analyze_tv_csv.compute_pivot_sr_bands() (CVCO W1 S/R logic)
+
+//@version=5
+indicator("9edge S/R Bands", shorttitle="9edgeSR", overlay=true, max_boxes_count=16)
+
+// ── Inputs (match Python: PIVOT_LEFT=10, ATR×0.2, min 3 touches, max 8 bands) ──
+grpPivot = "Pivot"
+pivotLeft  = input.int(10, "Left Bars", minval=1, group=grpPivot)
+pivotRight = input.int(10, "Right Bars", minval=1, group=grpPivot)
+
+grpSR = "S/R Bands"
+atrPeriod     = input.int(14, "ATR Period", minval=1, group=grpSR)
+atrMult       = input.float(0.2, "ATR Band Mult", minval=0.05, step=0.05, group=grpSR)
+minTouches    = input.int(3, "Min Touches", minval=2, group=grpSR)
+maxBands      = input.int(8, "Max Bands", minval=1, maxval=16, group=grpSR)
+extensionBars = input.int(12, "Extension Bars (right edge)", minval=0, group=grpSR)
+showSR        = input.bool(true, "Show S/R Bands", group=grpSR)
+
+// ── Wick pivots (S/R uses high/low, not close) ───────────────────────────────
+var array<float> phPrice = array.new_float()
+var array<float> plPrice = array.new_float()
+
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low, pivotLeft, pivotRight)
+
+if not na(ph)
+    array.push(phPrice, ph)
+if not na(pl)
+    array.push(plPrice, pl)
+
+// ATR = SMA(true range) — same as Python compute_atr_series()
+tr = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+atrVal = ta.sma(tr, atrPeriod)
+
+// Pine history refs: max 10000 bars back ([off] must be 0..10000)
+MAX_HIST = 10000
+
+countBarTouches(center, tol, isResistance) =>
+    cnt = 0
+    maxOff = math.min(bar_index, MAX_HIST)
+    for off = 0 to maxOff
+        px = isResistance ? high[off] : low[off]
+        if math.abs(px - center) <= tol
+            cnt += 1
+    cnt
+
+pushBandsFromPrices(prices, isRes, tol, bandMid, bandLo, bandHi) =>
+    sorted = array.copy(prices)
+    if array.size(sorted) > 0
+        array.sort(sorted, order.ascending)
+        cSum = array.new_float()
+        cCnt = array.new_int()
+        cMin = array.new_float()
+        cMax = array.new_float()
+        sortedSz = array.size(sorted)
+        for i = 0 to sortedSz - 1
+            pr = array.get(sorted, i)
+            placed = false
+            cSz = array.size(cSum)
+            if cSz > 0
+                for c = 0 to cSz - 1
+                    center = array.get(cSum, c) / array.get(cCnt, c)
+                    if math.abs(pr - center) <= tol
+                        array.set(cSum, c, array.get(cSum, c) + pr)
+                        array.set(cCnt, c, array.get(cCnt, c) + 1)
+                        array.set(cMin, c, math.min(array.get(cMin, c), pr))
+                        array.set(cMax, c, math.max(array.get(cMax, c), pr))
+                        placed := true
+                        break
+            if not placed
+                array.push(cSum, pr)
+                array.push(cCnt, 1)
+                array.push(cMin, pr)
+                array.push(cMax, pr)
+        cFinal = array.size(cSum)
+        if cFinal > 0
+            for c = 0 to cFinal - 1
+                pivN = array.get(cCnt, c)
+                center = array.get(cSum, c) / pivN
+                touches = pivN
+                if pivN < minTouches
+                    touches := countBarTouches(center, tol, isRes)
+                else
+                    barTouches = countBarTouches(center, tol, isRes)
+                    touches := math.max(pivN, barTouches)
+                if touches >= minTouches
+                    zlo = array.get(cMin, c) - tol * 0.15
+                    zhi = array.get(cMax, c) + tol * 0.15
+                    array.push(bandMid, center)
+                    array.push(bandLo, zlo)
+                    array.push(bandHi, zhi)
+
+zonesOverlap(zlo, zhi, klo, khi) =>
+    not (zhi + zlo * 0.02 < klo or zlo - zlo * 0.02 > khi)
+
+var array<box> srBoxes = array.new_box()
+
+if barstate.islast and showSR
+    boxSz = array.size(srBoxes)
+    if boxSz > 0
+        for i = 0 to boxSz - 1
+            box.delete(array.get(srBoxes, i))
+    array.clear(srBoxes)
+
+    tol = math.max(atrVal * atrMult, close * 0.002)
+    minHalf = tol * 0.35
+    bandMid = array.new_float()
+    bandLo = array.new_float()
+    bandHi = array.new_float()
+    pushBandsFromPrices(phPrice, true, tol, bandMid, bandLo, bandHi)
+    pushBandsFromPrices(plPrice, false, tol, bandMid, bandLo, bandHi)
+
+    n = array.size(bandMid)
+    if n > 0
+        bandOrder = array.new_int()
+        for i = 0 to n - 1
+            array.push(bandOrder, i)
+        if n > 1
+            for i = 1 to n - 1
+                key = array.get(bandOrder, i)
+                j = i - 1
+                keyDist = math.abs(array.get(bandMid, key) - close)
+                while j >= 0
+                    if math.abs(array.get(bandMid, array.get(bandOrder, j)) - close) > keyDist
+                        array.set(bandOrder, j + 1, array.get(bandOrder, j))
+                        j -= 1
+                    else
+                        break
+                array.set(bandOrder, j + 1, key)
+        keptLo = array.new_float()
+        keptHi = array.new_float()
+        kept = 0
+        msPerBar = timeframe.in_seconds(timeframe.period) * 1000
+        leftBarsBack = math.min(bar_index, 500)
+        leftTime = time[leftBarsBack]
+        rightTime = time + extensionBars * msPerBar
+        for oi = 0 to n - 1
+            if kept >= maxBands
+                break
+            bi = array.get(bandOrder, oi)
+            zlo = array.get(bandLo, bi)
+            zhi = array.get(bandHi, bi)
+            mid = (zlo + zhi) * 0.5
+            if zhi - zlo < minHalf * 2
+                zlo := mid - minHalf
+                zhi := mid + minHalf
+            overlap = false
+            if kept > 0
+                for k = 0 to kept - 1
+                    if zonesOverlap(zlo, zhi, array.get(keptLo, k), array.get(keptHi, k))
+                        overlap := true
+                        break
+            if not overlap
+                // Match TV draw: green below price, red at/above
+                below = zhi < close
+                col = below ? color.new(#26a69a, 0) : color.new(#ef5350, 0)
+                bg = below ? color.new(#26a69a, 72) : color.new(#ef5350, 72)
+                bx = box.new(leftTime, zhi, rightTime, zlo, xloc=xloc.bar_time, border_color=col, bgcolor=bg, border_width=2)
+                array.push(srBoxes, bx)
+                array.push(keptLo, zlo)
+                array.push(keptHi, zhi)
+                kept += 1
