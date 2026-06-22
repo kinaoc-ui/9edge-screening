@@ -278,7 +278,7 @@ def launch_tradingview_debug() -> tuple[bool, str]:
     bat = ROOT / "launch_tv_debug.bat"
     if not bat.exists():
         return False, f"搵唔到 {bat.name}"
-    creationflags = subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+    creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if sys.platform == "win32" else 0
     subprocess.Popen(
         ["cmd", "/c", str(bat)],
         cwd=str(ROOT),

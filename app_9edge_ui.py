@@ -10,22 +10,55 @@ from pathlib import Path
 
 import streamlit as st
 
-from fetch_tv_mcp import (
-    cdp_available,
+from edge_common import (
     csv_exists,
-    find_latest_screener_csv,
-    get_chart_state,
     get_csv_dir,
     is_cloud_environment,
-    launch_tradingview_debug,
     list_recent_reports,
     run_analyze_from_csv,
     run_analyze_from_yfinance,
-    run_batch_csv_analysis,
-    run_pipeline,
-    run_screener_analysis,
     save_csv_uploads,
 )
+
+_TV: object | None = None
+
+
+def _tv():
+    """Lazy-load TradingView MCP backend (local only — skip on Streamlit Cloud)."""
+    global _TV
+    if _TV is None:
+        import fetch_tv_mcp as _TV
+    return _TV
+
+
+def cdp_available() -> bool:
+    if is_cloud_environment():
+        return False
+    return _tv().cdp_available()
+
+
+def get_chart_state() -> dict:
+    return _tv().get_chart_state()
+
+
+def find_latest_screener_csv():
+    return _tv().find_latest_screener_csv()
+
+
+def launch_tradingview_debug():
+    return _tv().launch_tradingview_debug()
+
+
+def run_batch_csv_analysis():
+    return _tv().run_batch_csv_analysis()
+
+
+def run_pipeline(*args, **kwargs):
+    return _tv().run_pipeline(*args, **kwargs)
+
+
+def run_screener_analysis(*args, **kwargs):
+    return _tv().run_screener_analysis(*args, **kwargs)
 
 st.set_page_config(
     page_title="9-Edge Screening",
