@@ -2933,11 +2933,8 @@ def yf_daily_bars(ticker: str, period: str = "1y") -> list[dict] | None:
     return bars
 
 
-def yf_live_quote(ticker: str) -> dict | None:
-    """
-    Best available US session price — pre-market / regular / after-hours.
-    Returns None when only stale daily close is available (e.g. overnight CLOSED).
-    """
+def _yf_live_quote_impl(ticker: str) -> dict | None:
+    """Inner fetch — may block on yfinance .info (call via yf_live_quote with timeout)."""
     import yfinance as yf
 
     sym = ticker.upper()
@@ -3001,6 +2998,21 @@ def yf_live_quote(ticker: str) -> dict | None:
         "change_pct": round(change_pct, 2) if change_pct is not None else None,
         "market_state": state,
     }
+
+
+def yf_live_quote(ticker: str, *, timeout: float = 12.0) -> dict | None:
+    """
+    Best available US session price — pre-market / regular / after-hours.
+    Returns None when only stale daily close is available (e.g. overnight CLOSED).
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(_yf_live_quote_impl, ticker)
+        try:
+            return fut.result(timeout=timeout)
+        except FuturesTimeout:
+            return None
 
 
 def _apply_live_price_to_bars(bars: list[dict], price: float) -> list[dict]:
@@ -6528,13 +6540,12 @@ def format_combined_edge_dashboard(
     timeframes: dict[str, dict],
     setups: dict | None = None,
 ) -> list[str]:
-    """Stacked content-width rows: 現價 → Setup A → Setup B."""
+    """Stacked content-width rows: 現價 → Setup A → Setup B（現價 setup 同主表重複，唔再畫）。"""
     blocks: list[str] = [
         _edge_overview_html_table("現價（D1 主評）", timeframes),
     ]
     setups = setups or {}
     for key, label in (
-        ("current", "Setup 現價"),
         ("breakout", "Setup A 突破"),
         ("retest", "Setup B 回踩"),
     ):

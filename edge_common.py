@@ -175,6 +175,8 @@ def _reload_analyze_module():
     sys.path.insert(0, str(ROOT))
     import analyze_tv_csv
 
+    if is_cloud_environment():
+        return analyze_tv_csv
     return importlib.reload(analyze_tv_csv)
 
 

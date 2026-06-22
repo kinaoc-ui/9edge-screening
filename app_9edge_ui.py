@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import streamlit as st
 
-import screen_screener_csv as screener
 from edge_common import (
     csv_exists,
     get_csv_dir,
@@ -23,7 +24,24 @@ from edge_common import (
     save_csv_uploads,
 )
 
+if TYPE_CHECKING:
+    import screen_screener_csv as screener
+
+_SCREENER: object | None = None
 _TV: object | None = None
+
+
+def _screener():
+    """Lazy-load screener (heavy analyze_tv_csv import) — faster Cloud cold start."""
+    global _SCREENER
+    if _SCREENER is None:
+        import screen_screener_csv as _SCREENER
+    return _SCREENER
+
+
+def _widget_key(prefix: str, raw_id: str | None) -> str:
+    digest = hashlib.md5((raw_id or "view").encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"{prefix}_{digest}"
 
 
 def _tv():
@@ -121,7 +139,7 @@ def render_tv_watchlist_import(
         "flat `*_comma.txt` 唔會自動分組。"
     )
 
-    export_dirs = screener.list_tv_export_dirs()
+    export_dirs = _screener().list_tv_export_dirs()
     if default_export_dir and default_export_dir.is_dir():
         if default_export_dir not in export_dirs:
             export_dirs = [default_export_dir, *export_dirs]
@@ -145,8 +163,8 @@ def render_tv_watchlist_import(
         )
     ]
 
-    option_files = [f for f, _ in screener.TV_WATCHLIST_IMPORT_OPTIONS]
-    option_labels = {f: label for f, label in screener.TV_WATCHLIST_IMPORT_OPTIONS}
+    option_files = [f for f, _ in _screener().TV_WATCHLIST_IMPORT_OPTIONS]
+    option_labels = {f: label for f, label in _screener().TV_WATCHLIST_IMPORT_OPTIONS}
     available = [f for f in option_files if (picked_dir / f).is_file()]
     if not available:
         st.warning(f"`{picked_dir.name}` 入面冇 comma watchlist 檔。")
@@ -167,7 +185,7 @@ def render_tv_watchlist_import(
         key=f"{key_prefix}_tv_list_file",
     )
     list_path = picked_dir / list_file
-    symbols = screener.parse_comma_watchlist(list_path)
+    symbols = _screener().parse_comma_watchlist(list_path)
     st.caption(f"`{list_path.name}` · **{len(symbols)}** 隻 · `{list_path}`")
 
     if symbols:
@@ -235,7 +253,7 @@ def render_tv_watchlist_import(
         st.caption("⚠️ CDP 未連線 — 可用「下載 .txt」去 TV Watchlist → ⋯ → Import list")
 
 
-def render_screener_results(result: screener.ScreenerRunResult) -> None:
+def render_screener_results(result) -> None:
     """Show A/B/AB counts, output paths, downloads (after screener run)."""
     st.success(
         f"✅ 完成 — 分析 {result.analyzed}/{result.total_symbols} 隻"
@@ -289,7 +307,7 @@ def run_local_screener(csv_path: Path, *, limit: int = 0) -> None:
         status.caption(f"yfinance 分析緊 **{sym}**…")
 
     with st.spinner(f"Screener 跑緊（{csv_path.name}，可能 5–15 分鐘）…"):
-        result = screener.run_screener(csv_path, limit=limit, progress_callback=on_progress)
+        result = _screener().run_screener(csv_path, limit=limit, progress_callback=on_progress)
 
     progress.empty()
     status.empty()
@@ -506,7 +524,7 @@ def _render_report_body(report: str, title: str, entry: dict | None = None) -> N
         data=report,
         file_name=dl_name,
         mime="text/markdown",
-        key=f"download_report_{entry.get('id') if entry else 'view'}",
+        key=_widget_key("download_report", entry.get("id") if entry else None),
     )
     st.markdown(report, unsafe_allow_html=True)
 
@@ -738,7 +756,7 @@ def run_csv_analysis(
     st.session_state["last_logs"] = logs
     if result.ok:
         title = (
-            f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
+            f"{result.symbol} — {_screener().eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
             f"({result.decision})"
         )
         set_view_report(
@@ -763,7 +781,7 @@ def run_yfinance_analysis(sym: str) -> None:
     st.session_state["last_logs"] = result.logs
     if result.ok:
         title = (
-            f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
+            f"{result.symbol} — {_screener().eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
             f"({result.decision})"
         )
         set_view_report(
@@ -1008,7 +1026,7 @@ def render_local_toolbar(
         st.session_state["last_logs"] = result.logs
         if result.ok:
             title = (
-                f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
+                f"{result.symbol} — {_screener().eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
                 f"({result.decision})"
             )
             set_view_report(
@@ -1104,10 +1122,10 @@ def render_local_toolbar(
             run_local_screener(csv_path, limit=int(screener_limit))
 
     if prev := st.session_state.get("last_screener_result"):
-        if isinstance(prev, screener.ScreenerRunResult) and prev.ok:
+        if isinstance(prev, _screener().ScreenerRunResult) and prev.ok:
             with st.expander("📊 上次 Screener 結果", expanded=True):
                 render_screener_results(prev)
-    elif screener.list_tv_export_dirs():
+    elif _screener().list_tv_export_dirs():
         with st.expander("📥 TV Watchlist 匯入（已有匯出）", expanded=False):
             render_tv_watchlist_import(key_prefix="tv_import_tool")
 
@@ -1238,6 +1256,14 @@ def main_local(
 
 
 def main() -> None:
+    try:
+        _main_body()
+    except Exception as e:
+        st.error("應用程式錯誤")
+        st.exception(e)
+
+
+def _main_body() -> None:
     cloud_mode = detect_cloud_mode()
     connected, chart_sym, chart_tf_or_err = tv_status_badge(cloud_mode)
 
