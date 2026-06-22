@@ -488,7 +488,7 @@ def yf_to_bars(symbol: str, interval: str, period: str, min_bars: int) -> list[d
     return bars if len(bars) >= min_bars else None
 
 
-def score_from_yf(symbol: str, market_edge: dict) -> dict | None:
+def score_from_yf(symbol: str, market_edge: dict, *, sector: str | None = None, defer_sector_peers: bool = False) -> dict | None:
     sym = symbol.upper()
     d1_bars = yf_to_bars(sym, "1d", "2y", eng.TF_MIN_BARS["D1"])
     if not d1_bars:
@@ -502,6 +502,8 @@ def score_from_yf(symbol: str, market_edge: dict) -> dict | None:
         h1_bars=h1_bars,
         market_edge=market_edge,
         source="yfinance",
+        sector=sector,
+        defer_sector_peers=defer_sector_peers,
     )
 
 
@@ -835,7 +837,12 @@ def run_screener(
         if progress_callback:
             progress_callback(i, total, sym)
         try:
-            data = score_from_yf(sym, market_edge)
+            data = score_from_yf(
+                sym,
+                market_edge,
+                sector=(meta.get(sym) or {}).get("sector"),
+                defer_sector_peers=True,
+            )
             if data is None:
                 skipped.append(sym)
                 logs.append(f"{line} SKIP (no data)")
@@ -850,6 +857,8 @@ def run_screener(
             logs.append(f"{line} ERR: {e}")
         if delay and i < total:
             time.sleep(delay)
+
+    eng.attach_batch_sector_peers(results)
 
     json_path.write_text(
         json.dumps(_slim_results(results), ensure_ascii=False, indent=2),

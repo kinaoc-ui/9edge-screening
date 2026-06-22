@@ -403,9 +403,15 @@ Implemented: `build_rr_plan()` — `pick_structure_stop()`, `collect_reward_targ
 2. **動能/趨勢** — MA stack 或 higher lows（升）/ lower highs（跌）
 3. **MTF** — W1→D1 對齊做多/做空（無 CSV 時 fallback yfinance D1）
 
-**評分：** `board_edge` long=1 當大盤 Long Edge；short=1 當大盤 Short Edge（全市場共用，非個股板塊）。
+**SPY 報價：** 用 **即時 / 盤前 / 盤後**（yfinance `marketState`）；**唔用昨日收市**。無當前時段報價 → BME **參考·不計分**（同 MI 模式，從總分剔除）。
 
-Implemented: `assess_broad_market_edge()` — SPY from `charts/csv/SPY_*.csv` or yfinance D1。
+**同 Sector 升跌（子項）：** 報告顯示同板塊 peer 方向 — `升` / `跌` / `混合` / `無數據`。
+- Screener batch：同 Sector 內 peer 當日升跌統計（>0.15% 計升，<-0.15% 計跌）
+- 單股：fallback 該 Sector ETF（XLK/XLF…）即時升跌
+
+**評分：** `board_edge` long=1 當大盤 Long Edge；short=1 當大盤 Short Edge（全市場共用）。Sector peer 為參考子項，唔改 pillar 2/3 計分。
+
+Implemented: `assess_broad_market_edge()` + `yf_live_quote()` — SPY hist from `charts/csv/SPY_*.csv` or yfinance D1，現價 patch 最後一根 K。
 
 ---
 

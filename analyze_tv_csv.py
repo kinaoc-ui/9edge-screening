@@ -28,8 +28,28 @@ EDGES = [
 
 # MI 暫時只得 MACD — 計分關閉，報告仍顯示作參考（用戶自行喺 TV 睇）
 MI_EDGE_SCORING_ENABLED = False
-EDGE_SCORE_KEYS = list(EDGES) if MI_EDGE_SCORING_ENABLED else [k for k in EDGES if k != "mi"]
+_BME_SCORING_ENABLED = True
+
+
+def _build_edge_score_keys(*, bme_scoring: bool = True) -> list[str]:
+    keys = list(EDGES)
+    if not MI_EDGE_SCORING_ENABLED:
+        keys = [k for k in keys if k != "mi"]
+    if not bme_scoring:
+        keys = [k for k in keys if k != "board_edge"]
+    return keys
+
+
+EDGE_SCORE_KEYS = _build_edge_score_keys()
 EDGE_SCORE_MAX = len(EDGE_SCORE_KEYS)
+
+
+def set_bme_scoring_enabled(enabled: bool) -> None:
+    """Exclude board_edge from totals when SPY has no live / extended quote."""
+    global EDGE_SCORE_KEYS, EDGE_SCORE_MAX, _BME_SCORING_ENABLED
+    _BME_SCORING_ENABLED = enabled
+    EDGE_SCORE_KEYS = _build_edge_score_keys(bme_scoring=enabled)
+    EDGE_SCORE_MAX = len(EDGE_SCORE_KEYS)
 
 
 def edge_score_fmt(n: int | float) -> str:
@@ -2913,6 +2933,270 @@ def yf_daily_bars(ticker: str, period: str = "1y") -> list[dict] | None:
     return bars
 
 
+def yf_live_quote(ticker: str) -> dict | None:
+    """
+    Best available US session price — pre-market / regular / after-hours.
+    Returns None when only stale daily close is available (e.g. overnight CLOSED).
+    """
+    import yfinance as yf
+
+    sym = ticker.upper()
+    try:
+        t = yf.Ticker(sym)
+        info = dict(t.info or {})
+    except Exception:
+        return None
+    if not info:
+        return None
+
+    state = (info.get("marketState") or "").upper()
+    prev_raw = info.get("regularMarketPreviousClose") or info.get("previousClose")
+    prev = float(prev_raw) if prev_raw else None
+
+    price: float | None = None
+    session: str | None = None
+
+    if state in ("PRE", "PREPRE"):
+        p = info.get("preMarketPrice")
+        if p:
+            price, session = float(p), "盤前"
+    elif state == "REGULAR":
+        p = info.get("regularMarketPrice") or info.get("currentPrice")
+        if p:
+            price, session = float(p), "Regular"
+    elif state in ("POST", "POSTPOST"):
+        p = info.get("postMarketPrice")
+        if p:
+            price, session = float(p), "盤後"
+        elif info.get("regularMarketPrice"):
+            price, session = float(info["regularMarketPrice"]), "Regular收市"
+    elif state == "CLOSED":
+        p = info.get("postMarketPrice")
+        if p:
+            price, session = float(p), "盤後"
+        else:
+            p = info.get("preMarketPrice")
+            if p:
+                price, session = float(p), "盤前"
+
+    if price is None:
+        try:
+            fi = t.fast_info
+            lp = getattr(fi, "last_price", None)
+            if lp is None and isinstance(fi, dict):
+                lp = fi.get("lastPrice")
+            if lp and prev and abs(float(lp) - prev) > 1e-6:
+                price, session = float(lp), "即時"
+        except Exception:
+            pass
+
+    if price is None:
+        return None
+
+    change_pct = ((price / prev) - 1) * 100 if prev and prev > 0 else None
+    return {
+        "price": round(price, 4),
+        "session": session or "即時",
+        "prev_close": round(prev, 4) if prev else None,
+        "change_pct": round(change_pct, 2) if change_pct is not None else None,
+        "market_state": state,
+    }
+
+
+def _apply_live_price_to_bars(bars: list[dict], price: float) -> list[dict]:
+    """Patch last bar with live/extended quote for BME snapshot (not yesterday close)."""
+    if not bars:
+        return bars
+    out = [dict(b) for b in bars]
+    last = dict(out[-1])
+    last["close"] = price
+    last["high"] = max(float(last.get("high", price)), price)
+    last["low"] = min(float(last.get("low", price)), price)
+    out[-1] = last
+    return out
+
+
+def sector_etf_for(sector: str) -> str | None:
+    s = (sector or "").lower()
+    for key, tick in SECTOR_ETF.items():
+        if key in s:
+            return tick
+    return None
+
+
+def _sector_peer_direction_from_changes(
+    sector: str,
+    changes: list[float],
+    *,
+    source_note: str,
+) -> dict:
+    if not changes:
+        return {
+            "direction": "無數據",
+            "note": "同 Sector 升跌: 無數據",
+            "sector": sector,
+            "up": 0,
+            "down": 0,
+            "flat": 0,
+            "total": 0,
+            "source": source_note,
+        }
+    ups = sum(1 for c in changes if c > 0.15)
+    downs = sum(1 for c in changes if c < -0.15)
+    flats = len(changes) - ups - downs
+    if ups > downs and ups > flats:
+        direction = "升"
+    elif downs > ups and downs > flats:
+        direction = "跌"
+    else:
+        direction = "混合"
+    return {
+        "direction": direction,
+        "note": f"同 Sector 升跌: {direction}（{source_note}）",
+        "sector": sector,
+        "up": ups,
+        "down": downs,
+        "flat": flats,
+        "total": len(changes),
+        "source": source_note,
+    }
+
+
+def compute_batch_sector_peer_map(results: list[dict]) -> dict[str, dict]:
+    """Symbol -> sector peer direction from screener batch day changes."""
+    by_sector: dict[str, list[tuple[str, float]]] = {}
+    for r in results:
+        sec = (r.get("_meta") or {}).get("sector") or r.get("sector") or ""
+        sec = sec.strip()
+        if not sec:
+            continue
+        chg = r.get("day_change_pct")
+        if chg is None:
+            continue
+        by_sector.setdefault(sec, []).append((r["symbol"], float(chg)))
+
+    out: dict[str, dict] = {}
+    for sec, peers in by_sector.items():
+        changes = [c for _, c in peers]
+        base = _sector_peer_direction_from_changes(
+            sec,
+            changes,
+            source_note=f"{sec}: ↑{sum(1 for c in changes if c > 0.15)} "
+            f"↓{sum(1 for c in changes if c < -0.15)} 共{len(peers)}隻",
+        )
+        for sym, _ in peers:
+            out[sym] = dict(base)
+    return out
+
+
+def assess_sector_peer_direction(
+    symbol: str,
+    *,
+    sector: str | None = None,
+    batch_peers: dict[str, dict] | None = None,
+) -> dict:
+    """Sub-metric under BME — are same-sector peers mostly up or down today?"""
+    sym = symbol.upper()
+    if batch_peers and sym in batch_peers:
+        return batch_peers[sym]
+
+    sec = (sector or "").strip()
+    if not sec:
+        try:
+            import yfinance as yf
+            info = yf.Ticker(sym).info or {}
+            sec = (info.get("sector") or "").strip()
+        except Exception:
+            sec = ""
+
+    etf = sector_etf_for(sec)
+    if not etf:
+        return {
+            "direction": "無數據",
+            "note": "同 Sector 升跌: 無數據",
+            "sector": sec,
+            "up": 0,
+            "down": 0,
+            "flat": 0,
+            "total": 0,
+            "source": "—",
+        }
+
+    quote = yf_live_quote(etf)
+    if not quote or quote.get("change_pct") is None:
+        return {
+            "direction": "無數據",
+            "note": "同 Sector 升跌: 無數據",
+            "sector": sec,
+            "up": 0,
+            "down": 0,
+            "flat": 0,
+            "total": 0,
+            "source": f"{etf} ETF",
+        }
+
+    chg = float(quote["change_pct"])
+    if chg > 0.15:
+        direction = "升"
+    elif chg < -0.15:
+        direction = "跌"
+    else:
+        direction = "混合"
+    return {
+        "direction": direction,
+        "note": f"同 Sector 升跌: {direction}（{sec or etf} ETF {etf} {chg:+.2f}%·{quote['session']}）",
+        "sector": sec,
+        "up": 1 if direction == "升" else 0,
+        "down": 1 if direction == "跌" else 0,
+        "flat": 1 if direction == "混合" else 0,
+        "total": 1,
+        "source": f"{etf} ETF",
+        "etf_change_pct": chg,
+    }
+
+
+def _set_sector_peer_on_edges(data: dict, peer: dict) -> None:
+    note = peer.get("note", "")
+    if not note:
+        return
+    edges = data.get("edges") or {}
+    be = edges.get("board_edge")
+    if isinstance(be, dict):
+        base = be.get("note", "")
+        if "同 Sector 升跌:" in base:
+            base = base.split(" | 同 Sector 升跌:")[0].strip()
+        be["note"] = f"{base} | {note}" if base else note
+    short_notes = data.get("short_edge_notes") or {}
+    if short_notes.get("board_edge"):
+        base = short_notes["board_edge"]
+        if "同 Sector 升跌:" in base:
+            base = base.split(" | 同 Sector 升跌:")[0].strip()
+        short_notes["board_edge"] = f"{base} | {note}" if base else note
+    for tf_block in (data.get("timeframes") or {}).values():
+        for notes_key in ("long_notes", "short_notes"):
+            notes = tf_block.get(notes_key) or {}
+            if notes.get("board_edge"):
+                base = notes["board_edge"]
+                if "同 Sector 升跌:" in base:
+                    base = base.split(" | 同 Sector 升跌:")[0].strip()
+                notes["board_edge"] = f"{base} | {note}" if base else note
+
+
+def attach_batch_sector_peers(results: list[dict]) -> None:
+    """Post-process screener batch — attach sector peer sub-metric to each result."""
+    peer_map = compute_batch_sector_peer_map(results)
+    for r in results:
+        sym = r["symbol"]
+        peer = peer_map.get(sym) or assess_sector_peer_direction(
+            sym, sector=(r.get("_meta") or {}).get("sector"),
+        )
+        r["sector_peer_direction"] = peer
+        md = dict(r.get("market_edge_detail") or {})
+        md["sector_peers"] = peer
+        r["market_edge_detail"] = md
+        _set_sector_peer_on_edges(r, peer)
+
+
 def load_spy_market_data() -> dict:
     """SPY W1/D1/H1 from CSV if present; else yfinance daily D1."""
     sym = "SPY"
@@ -2952,7 +3236,7 @@ def load_spy_market_data() -> dict:
     return {"d1": d1, "d1_bars": d1_bars, "w1": w1, "h1": h1, "source": source}
 
 
-def _broad_market_fail(msg: str) -> dict:
+def _broad_market_fail(msg: str, *, skipped: bool = False) -> dict:
     return {
         "long_pass": 0,
         "short_pass": 0,
@@ -2965,6 +3249,10 @@ def _broad_market_fail(msg: str) -> dict:
         "close": None,
         "source": "—",
         "features": {},
+        "scoring_enabled": False,
+        "skipped": skipped,
+        "quote": None,
+        "sector_peers": None,
     }
 
 
@@ -3071,20 +3359,34 @@ def assess_broad_market_edge() -> dict:
       ① S&R long-edge zone / bear mirror
       ② Momentum/trend supportive
       ③ MTF W1->D1 aligned (fallback when no CSV)
+
+    Uses live / pre-market / after-hours SPY quote — not yesterday's daily close.
+    When no current-session quote is available, BME is skipped (參考·不計分).
     """
+    quote = yf_live_quote("SPY")
+    if not quote:
+        set_bme_scoring_enabled(False)
+        return _broad_market_fail(
+            "大盤無即時/盤前/盤後報價（唔用昨日收市）→ 參考·不計分",
+            skipped=True,
+        )
+
+    set_bme_scoring_enabled(True)
     try:
         raw = load_spy_market_data()
         if raw.get("error"):
-            return _broad_market_fail(raw["error"])
-        d1, bars = raw["d1"], raw["d1_bars"]
-        w1, h1, source = raw.get("w1"), raw.get("h1"), raw["source"]
+            set_bme_scoring_enabled(False)
+            return _broad_market_fail(raw["error"], skipped=True)
+        d1_bars = _apply_live_price_to_bars(raw["d1_bars"], quote["price"])
+        d1 = analyze_bars(d1_bars)
+        w1, h1, hist_source = raw.get("w1"), raw.get("h1"), raw["source"]
 
         sr_l, sr_ln = assess_bm_pillar_sr_long(d1)
-        mom_l, mom_ln = assess_bm_pillar_momentum_long(bars)
-        mtf_l, mtf_ln = assess_bm_pillar_mtf_long(w1, d1, h1, source)
-        sr_s, sr_sn = assess_bm_pillar_sr_short(d1, bars)
-        mom_s, mom_sn = assess_bm_pillar_momentum_short(bars)
-        mtf_s, mtf_sn = assess_bm_pillar_mtf_short(w1, d1, h1, source)
+        mom_l, mom_ln = assess_bm_pillar_momentum_long(d1_bars)
+        mtf_l, mtf_ln = assess_bm_pillar_mtf_long(w1, d1, h1, hist_source)
+        sr_s, sr_sn = assess_bm_pillar_sr_short(d1, d1_bars)
+        mom_s, mom_sn = assess_bm_pillar_momentum_short(d1_bars)
+        mtf_s, mtf_sn = assess_bm_pillar_mtf_short(w1, d1, h1, hist_source)
 
         long_count = sr_l + mom_l + mtf_l
         short_count = sr_s + mom_s + mtf_s
@@ -3098,14 +3400,19 @@ def assess_broad_market_edge() -> dict:
         else:
             bias, directive = "neutral", "大盤無明確 Edge → 觀望或減倉"
 
+        chg_txt = ""
+        if quote.get("change_pct") is not None:
+            chg_txt = f" {quote['change_pct']:+.2f}%"
+        price_src = f"SPY ${quote['price']:.2f}{chg_txt}（{quote['session']}）"
+
         icon = lambda ok: "✓" if ok else "—"
         long_note = (
             f"大盤 Long Edge {long_count}/3：S&R{icon(sr_l)} 動能{icon(mom_l)} MTF{icon(mtf_l)} "
-            f"| SPY ${d1['close']:.2f}（{source}）"
+            f"| {price_src}"
         )
         short_note = (
             f"大盤 Short Edge {short_count}/3：S&R{icon(sr_s)} 動能{icon(mom_s)} MTF{icon(mtf_s)} "
-            f"| SPY ${d1['close']:.2f}"
+            f"| {price_src}"
         )
 
         return {
@@ -3117,9 +3424,13 @@ def assess_broad_market_edge() -> dict:
             "directive": directive,
             "long_count": long_count,
             "short_count": short_count,
-            "close": d1["close"],
-            "source": source,
+            "close": quote["price"],
+            "source": f"{quote['session']}（hist:{hist_source}）",
             "qqq_note": _qqq_secondary_note(),
+            "quote": quote,
+            "scoring_enabled": True,
+            "skipped": False,
+            "sector_peers": None,
             "features": {
                 "sr_zone": {"long": sr_l, "short": sr_s, "long_note": sr_ln, "short_note": sr_sn},
                 "momentum": {"long": mom_l, "short": mom_s, "long_note": mom_ln, "short_note": mom_sn},
@@ -3127,7 +3438,8 @@ def assess_broad_market_edge() -> dict:
             },
         }
     except Exception as e:
-        return _broad_market_fail(f"大盤分析失敗: {e}")
+        set_bme_scoring_enabled(False)
+        return _broad_market_fail(f"大盤分析失敗: {e}", skipped=True)
 
 
 def _qqq_secondary_note() -> str:
@@ -5201,7 +5513,8 @@ EDGE_LABELS_ZH = {
     "mtf": "Multi-Timeframe",
     "rs": "Relative Strength",
     "rrs": "Reward / Risk / Structure",
-    "board_edge": "Broad Market",
+    "board_edge": "Broad Market"
+    + ("（參考·不計分）" if not _BME_SCORING_ENABLED else ""),
     "ft": "First Touch",
     "mi": "Major Indicators（參考·不計分）" if not MI_EDGE_SCORING_ENABLED else "Major Indicators",
 }
@@ -5643,6 +5956,9 @@ def score_from_bars(
     h1_bars: list[dict] | None = None,
     market_edge: dict | None = None,
     source: str = "CSV",
+    sector: str | None = None,
+    batch_sector_peers: dict[str, dict] | None = None,
+    defer_sector_peers: bool = False,
 ) -> dict:
     """Single scoring path for CSV and yfinance — same report structure."""
     sym = symbol.upper()
@@ -5671,10 +5987,31 @@ def score_from_bars(
 
     rs = assess_relative_strength(sym, bars)
     market = market_edge if market_edge is not None else get_broad_market_edge()
-    board_long = market["long_pass"]
-    board_short = market["short_pass"]
+    bme_active = bool(market.get("scoring_enabled", True) and not market.get("skipped"))
+    board_long = market["long_pass"] if bme_active else 0
+    board_short = market["short_pass"] if bme_active else 0
     board_long_note = market["long_note"]
     board_short_note = market["short_note"]
+    if not bme_active:
+        skip_tag = "（參考·不計分）"
+        if skip_tag not in board_long_note:
+            board_long_note = f"{board_long_note}{skip_tag}"
+            board_short_note = f"{board_short_note}{skip_tag}"
+
+    sym_quote = yf_live_quote(sym)
+    day_change_pct = sym_quote.get("change_pct") if sym_quote else None
+
+    sector_peer = {"direction": "無數據", "note": "", "sector": sector or ""}
+    if not defer_sector_peers:
+        sector_peer = assess_sector_peer_direction(
+            sym, sector=sector, batch_peers=batch_sector_peers,
+        )
+    market = dict(market)
+    if sector_peer.get("note"):
+        market["sector_peers"] = sector_peer
+        board_long_note = f"{board_long_note} | {sector_peer['note']}"
+        board_short_note = f"{board_short_note} | {sector_peer['note']}"
+
     sector_footnote = fetch_sector_footnote(sym)
     plan = build_rr_plan(d1, bars)
     channel_ref = compute_w1_channel_reference(w1_bars) if w1_bars else None
@@ -5760,6 +6097,8 @@ def score_from_bars(
         "rs_detail": rs,
         "market_edge_detail": market,
         "sector_footnote": sector_footnote,
+        "sector_peer_direction": sector_peer,
+        "day_change_pct": day_change_pct,
         "ft_detail": d1.get("ft_detail"),
         "mi_detail": mi_canonical,
         "mi_source_tf": mi_source_tf,
@@ -6261,6 +6600,8 @@ def format_tf_detail_section(tf: str, block: dict) -> list[str]:
             note = block["long_notes"]["mtf"]
         if key == "mi" and not MI_EDGE_SCORING_ENABLED:
             note = f"{note}（不計分·請喺 TV 睇 MACD）"
+        if key == "board_edge" and not _BME_SCORING_ENABLED:
+            note = f"{note}（參考·不計分）"
         lines.append(
             f"| {i + 1} | {labels[i]} | {'✅' if le else '❌'} | {'✅' if se else '❌'} | {note} |"
         )
@@ -6324,26 +6665,37 @@ def format_rs_section(rs_detail: dict) -> list[str]:
 
 
 def format_broad_market_section(market: dict) -> list[str]:
-    if not market or not market.get("features"):
+    skipped = market.get("skipped") or not market.get("scoring_enabled", True)
+    if not market or (not market.get("features") and skipped):
         note = market.get("long_note", "大盤數據不足") if market else "大盤數據不足"
-        return [
+        lines = [
             "## Edge #7 — Broad Market Edge（大盤 Long/Short Edge）",
             "",
             f"- **備註**：{note}",
-            "",
         ]
+        peer = (market or {}).get("sector_peers")
+        if peer and peer.get("note"):
+            lines.append(f"- **{peer['note']}**")
+        lines.append("")
+        return lines
     feats = market["features"]
     icon = lambda ok: "✅" if ok else "❌"
     long_ok = market.get("long_pass")
     short_ok = market.get("short_pass")
     bias_zh = {"long": "Long Edge（做多環境）", "short": "Short Edge（做空環境）", "neutral": "無明確 Edge"}
+    quote = market.get("quote") or {}
+    price_line = f"${market.get('close', '—')}"
+    if quote.get("change_pct") is not None:
+        price_line += f" ({quote['change_pct']:+.2f}%)"
+    price_line += f"（{market.get('source', '—')}）"
     lines = [
         "## Edge #7 — Broad Market Edge（大盤 Long/Short Edge）",
         "",
         "> **Trade What We See**：判斷大盤係 Long Edge 定 Short Edge；大盤 Long → 積極搵長倉（強勢股）；Short → 積極搵短倉。",
         "> 唔使三柱齊：**2/3** 通過即可（① S&R 匯聚區 ② 動能/趨勢 ③ MTF W1→D1）。",
+        "> SPY 用 **即時/盤前/盤後** 報價；無當前時段報價則 **參考·不計分**（唔用昨日收市）。",
         "",
-        f"- **SPY 收市**：${market.get('close', '—')}（{market.get('source', '—')}）",
+        f"- **SPY 現價**：{price_line}",
         f"- **大盤偏向**：{bias_zh.get(market.get('bias', 'neutral'), market.get('bias'))}",
         f"- **交易指引**：**{market.get('directive', '—')}**",
         f"- **Long Edge**：{'✅ 通過' if long_ok else '❌ 未過'}（{market.get('long_count', 0)}/3）",
@@ -6362,6 +6714,10 @@ def format_broad_market_section(market: dict) -> list[str]:
         lines.append(
             f"| {label} | {icon(f.get('long'))} | {icon(f.get('short'))} | {f.get('long_note', '—')} |"
         )
+    peer = market.get("sector_peers")
+    if peer and peer.get("note"):
+        lines.append("")
+        lines.append(f"- **{peer['note']}**")
     qqq = market.get("qqq_note")
     if qqq:
         lines.append("")
@@ -6729,6 +7085,8 @@ def format_md(data: dict) -> str:
         note = e["note"]
         if key == "mi" and not MI_EDGE_SCORING_ENABLED:
             note = f"{note}（不計分·請喺 TV 睇 MACD）"
+        if key == "board_edge" and (not _BME_SCORING_ENABLED or not (data.get("market_edge_detail") or {}).get("scoring_enabled", True)):
+            note = f"{note}（參考·不計分）"
         if key == "csp_pa_vol" and e.get("short_score"):
             note = f"Long: {note} | Short: {e.get('short_note', '')}"
         lines.append(f"| {i+1} | {labels[i]} | {icon} | {note} |")
@@ -6736,6 +7094,9 @@ def format_md(data: dict) -> str:
     mi_note = ""
     if not MI_EDGE_SCORING_ENABLED:
         mi_note = " · *MI/MACD 不計分，請喺 TV 自行確認*"
+    bme_skipped = not (data.get("market_edge_detail") or {}).get("scoring_enabled", True)
+    if bme_skipped:
+        mi_note += " · *BME 無即時報價不計分*"
     lines += [
         "",
         f"**Total: {edge_score_fmt(data['total_score'])} | Grade: {data['grade']} | Decision: {data['decision']}**{mi_note}",
