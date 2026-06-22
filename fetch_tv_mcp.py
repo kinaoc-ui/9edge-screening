@@ -120,6 +120,62 @@ def get_chart_state() -> dict:
     return tv_cmd("state")
 
 
+def add_symbol_to_watchlist(symbol: str) -> dict:
+    """Add one symbol to the active TradingView watchlist via MCP CLI."""
+    sym = (symbol or "").strip()
+    if not sym:
+        raise ValueError("empty symbol")
+    return tv_cmd("watchlist_add", sym)
+
+
+def import_watchlist_symbols(
+    symbols: list[str],
+    *,
+    delay: float = 0.12,
+    progress_callback=None,
+) -> tuple[int, list[str], list[str]]:
+    """
+    Add symbols to TV watchlist one-by-one.
+    Returns (added_count, errors, logs).
+    """
+    logs: list[str] = []
+    errors: list[str] = []
+    added = 0
+    total = len(symbols)
+    for i, sym in enumerate(symbols, 1):
+        try:
+            add_symbol_to_watchlist(sym)
+            added += 1
+            logs.append(f"Watchlist + {sym}")
+        except Exception as e:
+            msg = f"{sym}: {e}"
+            errors.append(msg)
+            logs.append(f"ERR {msg}")
+        if progress_callback:
+            progress_callback(i, total, sym)
+        if delay and i < total:
+            time.sleep(delay)
+    return added, errors, logs
+
+
+def import_watchlist_from_txt(
+    path: Path,
+    *,
+    delay: float = 0.12,
+    progress_callback=None,
+) -> tuple[int, int, list[str], list[str]]:
+    """Parse comma .txt and import to TV. Returns (added, total, errors, logs)."""
+    import screen_screener_csv as screener
+
+    symbols = screener.parse_comma_watchlist(path)
+    if not symbols:
+        return 0, 0, [f"清單為空或檔案不存在：{path}"], []
+    added, errors, logs = import_watchlist_symbols(
+        symbols, delay=delay, progress_callback=progress_callback
+    )
+    return added, len(symbols), errors, logs
+
+
 def short_symbol(full: str) -> str:
     s = (full or "").strip().upper()
     if ":" in s:
@@ -305,31 +361,31 @@ def launch_rrr() -> tuple[bool, str]:
     return True, "已啟動 RRR 風險回報計算器（Webhook :5000/tv_webhook）"
 
 
-def run_screener_analysis(csv_path: Path) -> tuple[bool, str, list[str]]:
-    """Run screen_screener_csv.py on a screener export CSV."""
-    logs = [f"Screener CSV: {csv_path}"]
-    if not csv_path.exists():
-        msg = f"檔案不存在：{csv_path}"
-        logs.append(msg)
-        return False, msg, logs
-    try:
-        rc, out = _run_python_cli("screen_screener_csv.py", str(csv_path), timeout=3600)
-        if out:
-            logs.extend(out.splitlines()[-40:])
-        if rc != 0:
-            return False, f"Screener 失敗 (exit {rc})", logs
-        summary = sorted(REPORTS.glob("SCREENER_*_summary.md"), key=lambda p: p.stat().st_mtime)
-        hint = f"摘要：{summary[-1].name}" if summary else "完成"
-        logs.append(hint)
-        return True, hint, logs
-    except subprocess.TimeoutExpired:
-        msg = "Screener 逾時（>60 分鐘）"
-        logs.append(msg)
-        return False, msg, logs
-    except Exception as e:
-        msg = str(e)
-        logs.append(f"ERROR: {msg}")
-        return False, msg, logs
+def run_screener_analysis(
+    csv_path: Path,
+    *,
+    limit: int = 0,
+    delay: float = 0.15,
+    progress_callback=None,
+) -> tuple[bool, str, list[str]]:
+    """Run screen_screener_csv on a screener export CSV (direct import)."""
+    import screen_screener_csv as screener
+
+    result = screener.run_screener(
+        csv_path,
+        limit=limit,
+        delay=delay,
+        progress_callback=progress_callback,
+    )
+    if not result.ok:
+        return False, result.error, result.logs
+    hint = (
+        f"A {result.a_count} · B {result.b_count} · AB {result.ab_count} "
+        f"（{result.analyzed}/{result.total_symbols} 分析成功）"
+    )
+    if result.summary_path:
+        hint += f" — {result.summary_path.name}"
+    return True, hint, result.logs
 
 
 def run_batch_csv_analysis() -> tuple[bool, str, list[str]]:
@@ -414,7 +470,7 @@ def run_analyze_from_csv(
         result.grade = data.get("grade", "")
         result.total_score = data.get("total_score", 0)
         result.decision = data.get("decision", "")
-        logs.append(f"Done: {result.total_score}/9 Grade {result.grade} ({result.decision})")
+        logs.append(f"Done: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} ({result.decision})")
         logs.append(f"Report: {report_path.name}")
         return result
     except Exception as e:
@@ -459,7 +515,7 @@ def run_analyze_from_yfinance(symbol: str) -> PipelineResult:
         result.total_score = data.get("total_score", 0)
         result.decision = data.get("decision", "")
         logs.append(
-            f"Done: {result.total_score}/9 Grade {result.grade} ({result.decision}) · yfinance"
+            f"Done: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} ({result.decision}) · yfinance"
         )
         if report_path:
             logs.append(f"Report: {report_path.name}")
@@ -535,7 +591,7 @@ def run_pipeline(
         result.grade = data.get("grade", "")
         result.total_score = data.get("total_score", 0)
         result.decision = data.get("decision", "")
-        logs.append(f"Done: {result.total_score}/9 Grade {result.grade} ({result.decision})")
+        logs.append(f"Done: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} ({result.decision})")
         logs.append(f"Report: {report_path.name}")
         return result
 

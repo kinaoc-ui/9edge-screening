@@ -26,6 +26,26 @@ EDGES = [
     "rrs", "board_edge", "ft", "mi",
 ]
 
+# MI 暫時只得 MACD — 計分關閉，報告仍顯示作參考（用戶自行喺 TV 睇）
+MI_EDGE_SCORING_ENABLED = False
+EDGE_SCORE_KEYS = list(EDGES) if MI_EDGE_SCORING_ENABLED else [k for k in EDGES if k != "mi"]
+EDGE_SCORE_MAX = len(EDGE_SCORE_KEYS)
+
+
+def edge_score_fmt(n: int | float) -> str:
+    return f"{int(n)}/{EDGE_SCORE_MAX}"
+
+
+def sum_edge_scores(edges: dict) -> int:
+    total = 0
+    for k in EDGE_SCORE_KEYS:
+        v = edges.get(k)
+        if isinstance(v, dict):
+            total += int(v.get("score", 0) or 0)
+        else:
+            total += int(v or 0)
+    return total
+
 TF_ORDER = ("W1", "D1", "H1")
 TF_MIN_BARS = {"W1": 20, "D1": 30, "H1": 20}
 TF_PRIORITY = {"W1": 0, "D1": 1, "H1": 2}
@@ -5153,7 +5173,7 @@ EDGE_LABELS_ZH = {
     "rrs": "Reward / Risk / Structure",
     "board_edge": "Broad Market",
     "ft": "First Touch",
-    "mi": "Major Indicators",
+    "mi": "Major Indicators（參考·不計分）" if not MI_EDGE_SCORING_ENABLED else "Major Indicators",
 }
 
 
@@ -5309,8 +5329,8 @@ def build_edge_scenarios(
             bars, price, rs_long, rs_short, board_long, board_short, mtf_long, mtf_short,
             rs_note, rs_short_note, board_long_note, board_short_note, mtf_note, mi_override,
         )
-        long_count = sum(long_e.values())
-        short_count = sum(short_e.values())
+        long_count = sum_edge_scores(long_e)
+        short_count = sum_edge_scores(short_e)
         long_new = [EDGE_LABELS_ZH[k] for k in EDGES if long_e[k] and not base_long.get(k)]
         short_new = [EDGE_LABELS_ZH[k] for k in EDGES if short_e[k] and not base_short.get(k)]
         long_lost = [EDGE_LABELS_ZH[k] for k in EDGES if base_long.get(k) and not long_e[k]]
@@ -5333,7 +5353,7 @@ def build_edge_scenarios(
         })
 
     future = [s for s in scenarios if s["kind"] != "current"]
-    cur_long = sum(base_long.values())
+    cur_long = sum_edge_scores(base_long)
     best_long = max(
         future,
         key=lambda s: (len(s["long_new"]), s["long_count"], -s["short_count"]),
@@ -5346,7 +5366,7 @@ def build_edge_scenarios(
         key=lambda s: (len(s["short_new"]), s["short_count"], -s["long_count"]),
         default=None,
     )
-    cur_short = sum(base_short.values())
+    cur_short = sum_edge_scores(base_short)
     if best_short and not best_short["short_new"] and best_short["short_count"] <= cur_short:
         best_short = None
     if best_short and (
@@ -5356,10 +5376,10 @@ def build_edge_scenarios(
         best_short = None
 
     return {
-        "current_long": sum(base_long.values()),
-        "current_short": sum(base_short.values()),
-        "bias": "long" if sum(base_long.values()) > sum(base_short.values())
-        else ("short" if sum(base_short.values()) > sum(base_long.values()) else "neutral"),
+        "current_long": sum_edge_scores(base_long),
+        "current_short": sum_edge_scores(base_short),
+        "bias": "long" if sum_edge_scores(base_long) > sum_edge_scores(base_short)
+        else ("short" if sum_edge_scores(base_short) > sum_edge_scores(base_long) else "neutral"),
         "scenarios": scenarios,
         "best_long": best_long,
         "best_short": best_short,
@@ -5367,7 +5387,7 @@ def build_edge_scenarios(
 
 
 def grade_from_edges(edges: dict) -> tuple[int, str, str]:
-    total = sum(e["score"] for e in edges.values())
+    total = sum_edge_scores(edges)
     core = [edges[k]["score"] for k in ("momentum_trend", "sr", "csp_pa_vol", "mtf", "rs")]
     if total >= 7 and all(core):
         return total, "A", "trade"
@@ -5565,8 +5585,8 @@ def build_per_tf_block(
         },
         "long_edges": long_edges,
         "short_edges": short_edges,
-        "long_count": sum(long_edges.values()),
-        "short_count": sum(short_edges.values()),
+        "long_count": sum_edge_scores(long_edges),
+        "short_count": sum_edge_scores(short_edges),
         "long_notes": long_notes,
         "short_notes": short_notes,
     }
@@ -5865,6 +5885,39 @@ def build_setups(d1: dict, bars: list[dict] | None = None) -> dict:
     return {"breakout": setup_a, "retest": setup_b}
 
 
+SCREENER_MIN_BEST_RR = 3.0
+
+
+def evaluate_screener_setups(setups: dict | None) -> dict:
+    """
+    Screener shortlist: Breakout + Retest 兩個 setup 都要 valid，
+    且至少一個 RR >= SCREENER_MIN_BEST_RR (default 3R).
+    """
+    bo = (setups or {}).get("breakout") or {}
+    rt = (setups or {}).get("retest") or {}
+    rr_bo = float(bo.get("rr") or 0)
+    rr_rt = float(rt.get("rr") or 0)
+    both_valid = bool(bo.get("valid")) and bool(rt.get("valid"))
+    best_rr = max(rr_bo, rr_rt)
+    passes = both_valid and best_rr >= SCREENER_MIN_BEST_RR
+    return {
+        "breakout_rr": round(rr_bo, 2),
+        "retest_rr": round(rr_rt, 2),
+        "best_rr": round(best_rr, 2),
+        "both_valid": both_valid,
+        "breakout_valid": bool(bo.get("valid")),
+        "retest_valid": bool(rt.get("valid")),
+        "passes": passes,
+    }
+
+
+def passes_screener_shortlist(data: dict) -> bool:
+    """A/B grade + 雙 setup valid + 至少一個 ≥3R."""
+    if (data.get("grade") or "") not in ("A", "B"):
+        return False
+    return evaluate_screener_setups(data.get("setups")).get("passes", False)
+
+
 def attach_setup_edge_overviews(
     setups: dict,
     *,
@@ -5917,7 +5970,7 @@ def build_summary_text(data: dict) -> str:
     edges = data["edges"]
 
     decision_zh = {"trade": "可研究入場", "watch": "放 watchlist", "skip": "而家唔買"}
-    headline = f"{sym} **{total}/9 | Grade {grade} | {decision}** — {decision_zh.get(decision, decision)}。"
+    headline = f"{sym} **{edge_score_fmt(total)} | Grade {grade} | {decision}** — {decision_zh.get(decision, decision)}。"
 
     failed_core = [CORE_LABELS[k] for k in CORE_LABELS if not edges[k]["score"]]
     parts = [headline]
@@ -5946,7 +5999,10 @@ def build_summary_text(data: dict) -> str:
     if sc:
         bias = sc.get("bias", "neutral")
         bias_zh = {"long": "偏多", "short": "偏空", "neutral": "中性"}
-        parts.append(f"Long edge {sc.get('current_long', 0)}/9 vs Short {sc.get('current_short', 0)}/9（{bias_zh.get(bias, bias)}）。")
+        parts.append(
+            f"Long edge {edge_score_fmt(sc.get('current_long', 0))} vs "
+            f"Short {edge_score_fmt(sc.get('current_short', 0))}（{bias_zh.get(bias, bias)}）。"
+        )
         tfs = data.get("timeframes") or {}
         if tfs:
             tf_bits = [f"{tf} L{tfs[tf]['long_count']}/S{tfs[tf]['short_count']}" for tf in TF_ORDER if tf in tfs]
@@ -5955,11 +6011,11 @@ def build_summary_text(data: dict) -> str:
         best = sc.get("best_long")
         if best and best.get("long_new"):
             gain = "、".join(best["long_new"])
-            parts.append(f"若{best['label']} → Long {best['long_count']}/9（+{gain}）。")
+            parts.append(f"若{best['label']} → Long {edge_score_fmt(best['long_count'])}（+{gain}）。")
         best_s = sc.get("best_short")
         if best_s and best_s.get("short_new"):
             gain_s = "、".join(best_s["short_new"])
-            parts.append(f"若{best_s['label']} → Short {best_s['short_count']}/9（+{gain_s}）。")
+            parts.append(f"若{best_s['label']} → Short {edge_score_fmt(best_s['short_count'])}（+{gain_s}）。")
     return " ".join(parts)
 
 
@@ -5975,7 +6031,7 @@ def discover_symbols() -> list[str]:
 def one_line_conclusion(data: dict) -> str:
     decision_zh = {"trade": "可研究入場", "watch": "放 watchlist", "skip": "而家唔買"}
     d = decision_zh.get(data["decision"], data["decision"])
-    base = f"**{data['total_score']}/9 | Grade {data['grade']} | {data['decision']}** — {d}。"
+    base = f"**{edge_score_fmt(data['total_score'])} | Grade {data['grade']} | {data['decision']}** — {d}。"
     extras: list[str] = []
     if data.get("grade") == "A" and not extras:
         return base
@@ -6034,7 +6090,7 @@ def _edge_overview_table_rows(timeframes: dict[str, dict]) -> list[str]:
         le = block["long_edges"]
         icons = " | ".join(_edge_icon(le[k]) for k in EDGE_OVERVIEW_KEYS)
         rows.append(
-            f"| **{tf}** | {block['long_count']}/9 | {block['short_count']}/9 | "
+            f"| **{tf}** | {edge_score_fmt(block['long_count'])} | {edge_score_fmt(block['short_count'])} | "
             f"${block['close']:.2f} | {icons} |"
         )
     return rows
@@ -6055,8 +6111,8 @@ def _edge_overview_html_table(title: str, timeframes: dict[str, dict]) -> str:
             le = block["long_edges"]
             cells = [
                 f"<b>{tf}</b>",
-                f"{block['long_count']}/9",
-                f"{block['short_count']}/9",
+                edge_score_fmt(block['long_count']),
+                edge_score_fmt(block['short_count']),
                 f"${block['close']:.2f}",
                 *(_edge_icon(le[k]) for k in EDGE_OVERVIEW_KEYS),
             ]
@@ -6119,7 +6175,7 @@ def format_tf_overview_table(timeframes: dict[str, dict]) -> list[str]:
         se = block["short_edges"]
         icon = lambda v: "✅" if v else "❌"
         lines.append(
-            f"| **{tf}** | {block['long_count']}/9 | {block['short_count']}/9 | "
+            f"| **{tf}** | {edge_score_fmt(block['long_count'])} | {edge_score_fmt(block['short_count'])} | "
             f"${block['close']:.2f} | {icon(le['momentum_trend'])} | {icon(le['sr'])} | "
             f"{icon(le['csp_pa_vol'])} | {icon(le['mtf'])} | {icon(le['ft'])} | {icon(le['mi'])} |"
         )
@@ -6132,7 +6188,7 @@ def format_tf_detail_section(tf: str, block: dict) -> list[str]:
     lines = [
         f"## {tf} Edge 明細",
         "",
-        f"收市 **${block['close']:.2f}** | Long **{block['long_count']}/9** | Short **{block['short_count']}/9**",
+        f"收市 **${block['close']:.2f}** | Long **{edge_score_fmt(block['long_count'])}** | Short **{edge_score_fmt(block['short_count'])}**",
         "",
         "| # | Edge | Long | Short | Notes (Long) |",
         "|---|------|:----:|:-----:|--------------|",
@@ -6145,6 +6201,8 @@ def format_tf_detail_section(tf: str, block: dict) -> list[str]:
             note = f"{note}（市場/run 級，各 TF 共用）"
         if key == "mtf":
             note = block["long_notes"]["mtf"]
+        if key == "mi" and not MI_EDGE_SCORING_ENABLED:
+            note = f"{note}（不計分·請喺 TV 睇 MACD）"
         lines.append(
             f"| {i + 1} | {labels[i]} | {'✅' if le else '❌'} | {'✅' if se else '❌'} | {note} |"
         )
@@ -6484,8 +6542,8 @@ def format_price_scenarios(data: dict) -> list[str]:
         sr_hint = (s.get("sr_note") or "")[:36]
         src_col = _format_scenario_sources(s)
         lines.append(
-            f"| {s['label']} | {_fmt_scenario_price(s)} | {src_col} | {s['long_count']}/9 | "
-            f"{s['short_count']}/9 | {ln} | {sn} | {sr_hint} |"
+            f"| {s['label']} | {_fmt_scenario_price(s)} | {src_col} | {edge_score_fmt(s['long_count'])} | "
+            f"{edge_score_fmt(s['short_count'])} | {ln} | {sn} | {sr_hint} |"
         )
     lines.append("")
     lines.append("</div>")
@@ -6494,14 +6552,14 @@ def format_price_scenarios(data: dict) -> list[str]:
     if best and best.get("long_new"):
         gain = "、".join(best["long_new"])
         lines += [
-            f"**最有潛力 Long 情景**：{best['label']} @ {_fmt_scenario_price(best)} → Long **{best['long_count']}/9**（+{gain}）",
+            f"**最有潛力 Long 情景**：{best['label']} @ {_fmt_scenario_price(best)} → Long **{edge_score_fmt(best['long_count'])}**（+{gain}）",
             "",
         ]
     best_s = sc.get("best_short")
     if best_s and best_s.get("short_new"):
         gain_s = "、".join(best_s["short_new"])
         lines += [
-            f"**最有潛力 Short 情景**：{best_s['label']} @ {_fmt_scenario_price(best_s)} → Short **{best_s['short_count']}/9**（+{gain_s}）",
+            f"**最有潛力 Short 情景**：{best_s['label']} @ {_fmt_scenario_price(best_s)} → Short **{edge_score_fmt(best_s['short_count'])}**（+{gain_s}）",
             "",
         ]
     return lines
@@ -6578,8 +6636,8 @@ def format_md(data: dict) -> str:
         lines += [
             "## Long vs Short Edge 對比（現價）",
             "",
-            f"- **Long edges**：{sc.get('current_long', 0)}/9",
-            f"- **Short edges**：{sc.get('current_short', 0)}/9",
+            f"- **Long edges**：{edge_score_fmt(sc.get('current_long', 0))}",
+            f"- **Short edges**：{edge_score_fmt(sc.get('current_short', 0))}",
             f"- **偏向**：{bias_zh.get(sc.get('bias', 'neutral'), sc.get('bias'))}",
             "",
         ]
@@ -6588,7 +6646,7 @@ def format_md(data: dict) -> str:
     edges = data["edges"]
     if short_edges:
         lines += [
-            "## Short Edge 明細（9/9）",
+            f"## Short Edge 明細（{EDGE_SCORE_MAX}/{EDGE_SCORE_MAX}）",
             "",
             "| # | Edge | Short | Notes |",
             "|---|------|:-----:|-------|",
@@ -6599,7 +6657,7 @@ def format_md(data: dict) -> str:
             lines.append(f"| {i+1} | {labels[i]} | {icon} | {note} |")
         lines.append("")
     lines += [
-        "## 9-Edge 評分（Long，D1 主評級）",
+        f"## {EDGE_SCORE_MAX}-Edge 評分（Long，D1 主評級）",
         "",
         "| # | Edge | Long | Notes |",
         "|---|------|:----:|-------|",
@@ -6608,11 +6666,20 @@ def format_md(data: dict) -> str:
         e = data["edges"][key]
         icon = "✅" if e["score"] else "❌"
         note = e["note"]
+        if key == "mi" and not MI_EDGE_SCORING_ENABLED:
+            note = f"{note}（不計分·請喺 TV 睇 MACD）"
         if key == "csp_pa_vol" and e.get("short_score"):
             note = f"Long: {note} | Short: {e.get('short_note', '')}"
         lines.append(f"| {i+1} | {labels[i]} | {icon} | {note} |")
 
-    lines += ["", f"**Total: {data['total_score']}/9 | Grade: {data['grade']} | Decision: {data['decision']}**", ""]
+    mi_note = ""
+    if not MI_EDGE_SCORING_ENABLED:
+        mi_note = " · *MI/MACD 不計分，請喺 TV 自行確認*"
+    lines += [
+        "",
+        f"**Total: {edge_score_fmt(data['total_score'])} | Grade: {data['grade']} | Decision: {data['decision']}**{mi_note}",
+        "",
+    ]
 
     p = data.get("entry_plan") or {}
     if p.get("entry"):
@@ -6655,11 +6722,11 @@ def format_batch_summary(results: list[dict]) -> str:
         sc = r.get("scenarios") or {}
         best = sc.get("best_long") or {}
         pot_price = f"${best['price']}" if best.get("price") else "—"
-        pot_long = f"{best['long_count']}/9" if best.get("long_count") else "—"
+        pot_long = edge_score_fmt(best['long_count']) if best.get("long_count") else "—"
         bias = sc.get("bias", "—")
         lines.append(
-            f"| {r['symbol']} | {r['total_score']}/9 | {sc.get('current_long', '—')}/9 | "
-            f"{sc.get('current_short', '—')}/9 | {pot_price} | {pot_long} | {bias} | {r['grade']} |"
+            f"| {r['symbol']} | {edge_score_fmt(r['total_score'])} | {edge_score_fmt(sc.get('current_long', 0))} | "
+            f"{edge_score_fmt(sc.get('current_short', 0))} | {pot_price} | {pot_long} | {bias} | {r['grade']} |"
         )
     a_list = [r["symbol"] for r in results if r["grade"] == "A"]
     b_list = [r["symbol"] for r in results if r["grade"] == "B"]
@@ -6673,7 +6740,10 @@ def format_batch_summary(results: list[dict]) -> str:
         lines.append("**潛力榜（最佳 Long 情景）：**")
         for r in pot_list[:5]:
             b = r["scenarios"]["best_long"]
-            lines.append(f"- **{r['symbol']}** @ ${b['price']} → Long {b['long_count']}/9（現況 {r['total_score']}/9）")
+            lines.append(
+                f"- **{r['symbol']}** @ ${b['price']} → Long {edge_score_fmt(b['long_count'])}"
+                f"（現況 {edge_score_fmt(r['total_score'])}）"
+            )
     return "\n".join(lines)
 
 
@@ -6724,7 +6794,7 @@ def main() -> None:
                 out = REPORTS / f"{sym}_{date.today().isoformat()}_9edge_csv.md"
                 out.write_text(format_md(data), encoding="utf-8")
                 results.append(data)
-                print(f"OK {sym} {data['total_score']}/9 {data['grade']}")
+                print(f"OK {sym} {edge_score_fmt(data['total_score'])} {data['grade']}")
             except Exception as e:
                 print(f"SKIP {sym}: {e}")
         summary = REPORTS / f"BATCH_{date.today().isoformat()}_summary.md"

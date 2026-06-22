@@ -219,7 +219,9 @@ def run_analyze_from_csv(
         result.grade = data.get("grade", "")
         result.total_score = data.get("total_score", 0)
         result.decision = data.get("decision", "")
-        logs.append(f"Done: {result.total_score}/9 Grade {result.grade} ({result.decision})")
+        logs.append(
+            f"Done: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} ({result.decision})"
+        )
         return result
     except Exception as e:
         result.error = str(e)
@@ -261,7 +263,7 @@ def run_analyze_from_yfinance(symbol: str) -> PipelineResult:
         result.total_score = data.get("total_score", 0)
         result.decision = data.get("decision", "")
         logs.append(
-            f"Done: {result.total_score}/9 Grade {result.grade} ({result.decision}) · yfinance"
+            f"Done: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} ({result.decision}) · yfinance"
         )
         return result
     except Exception as e:

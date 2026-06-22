@@ -9,6 +9,8 @@ import json
 import re
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -19,6 +21,15 @@ import analyze_tv_csv as eng  # noqa: E402
 
 REPORTS = ROOT / "reports" / "batch"
 TV_EXPORT = REPORTS / "tv_import"
+
+# Official TV import: *_comma.txt only (see README_TV_IMPORT.txt)
+TV_WATCHLIST_IMPORT_OPTIONS: list[tuple[str, str]] = [
+    ("AB_grade_comma.txt", "AB 短名單（雙 Setup ≥3R）"),
+    ("A_grade_comma.txt", "A 級全部"),
+    ("B_grade_comma.txt", "B 級 Watch"),
+    ("Potential_Top20_comma.txt", "潛力榜 Top 20"),
+    ("Score7plus_comma.txt", f"現況 ≥7/{eng.EDGE_SCORE_MAX}"),
+]
 
 TV_EXCHANGE_MAP = {
     "NMS": "NASDAQ",
@@ -103,6 +114,32 @@ def resolve_tv_ticker(symbol: str, cache: dict[str, str]) -> str:
     return tv
 
 
+def list_tv_export_dirs() -> list[Path]:
+    """Newest-first tv_import batch folders."""
+    if not TV_EXPORT.is_dir():
+        return []
+    return sorted(
+        [p for p in TV_EXPORT.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def parse_comma_watchlist(path: Path) -> list[str]:
+    """Parse EXCHANGE:SYMBOL comma list from official TV import .txt."""
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    return [t.strip() for t in text.split(",") if t.strip()]
+
+
+def watchlist_import_path(export_dir: Path, filename: str) -> Path | None:
+    p = export_dir / filename
+    return p if p.is_file() else None
+
+
 def write_tv_txt(tickers: list[str], path: Path, *, comma: bool = True) -> None:
     """TradingView official import: .txt, EXCHANGE:SYMBOL, comma-separated."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,13 +179,22 @@ def enrich_result_row(r: dict, meta: dict[str, dict], tv_cache: dict[str, str]) 
     m = meta.get(sym) or {}
     sc = r.get("scenarios") or {}
     best = sc.get("best_long") or {}
+    setup_ev = r.get("setup_eval") or eng.evaluate_screener_setups(r.get("setups"))
+    setups = r.get("setups") or {}
+    bo = setups.get("breakout") or {}
+    rt = setups.get("retest") or {}
+    grade = r.get("grade") or ""
+    if "shortlist" in r:
+        shortlist = bool(r["shortlist"])
+    else:
+        shortlist = grade in ("A", "B") and setup_ev.get("passes", False)
     return {
         "symbol": sym,
         "tv_ticker": resolve_tv_ticker(sym, tv_cache),
         "sector": m.get("sector") or "",
         "industry": m.get("industry") or "",
         "description": m.get("description") or "",
-        "grade": r.get("grade") or "",
+        "grade": grade,
         "decision": r.get("decision") or "",
         "score": r.get("total_score") or 0,
         "long": sc.get("current_long", "—"),
@@ -156,6 +202,13 @@ def enrich_result_row(r: dict, meta: dict[str, dict], tv_cache: dict[str, str]) 
         "pot_long": best.get("long_count") or "",
         "pot_price": best.get("price") or "",
         "bias": sc.get("bias") or "",
+        "shortlist": shortlist,
+        "breakout_rr": setup_ev.get("breakout_rr", 0),
+        "retest_rr": setup_ev.get("retest_rr", 0),
+        "best_rr": setup_ev.get("best_rr", 0),
+        "breakout_entry": bo.get("entry") or "",
+        "retest_entry": rt.get("entry") or "",
+        "both_setups_valid": setup_ev.get("both_valid", False),
     }
 
 
@@ -173,6 +226,7 @@ def export_tv_watchlists(
 
     a_rows = [x for x in rows if x["grade"] == "A"]
     b_rows = [x for x in rows if x["grade"] == "B"]
+    ab_rows = [x for x in rows if x.get("shortlist")]
     pot_rows = sorted(
         [x for x in rows if x["pot_long"]],
         key=lambda x: (-int(x["pot_long"]), -int(x["score"])),
@@ -195,8 +249,10 @@ def export_tv_watchlists(
         "  A_grade_by_sector_industry.txt — A 級按 Sector + Industry 分組（參考 TV_Watchlist 格式）\n"
         "  B_grade_comma.txt       — B 級 Watch\n"
         "  B_grade_by_sector_industry.txt — B 級按 Sector + Industry 分組\n"
+        "  AB_grade_comma.txt      — A/B 級 + 雙 Setup valid + 至少一個 ≥3R\n"
+        "  AB_grade_by_sector_industry.txt — 同上，按 Sector + Industry 分組\n"
         "  Potential_Top20_comma.txt — 潛力榜 Top 20\n"
-        "  Score7plus_comma.txt    — 現況 ≥7/9\n"
+        "  Score7plus_comma.txt    — 現況 ≥7\n"
         "  A_by_sector/*.txt        — A 級只按 Sector 分組（comma）\n"
         "  classified_full.csv      — 完整表（含 Sector / Industry）\n\n"
         "Note: TV 官方 import 用 *_comma.txt（唔支援 sector header）。\n"
@@ -213,6 +269,7 @@ def export_tv_watchlists(
 
     _export_group(a_rows, "A_grade")
     _export_group(b_rows, "B_grade")
+    _export_group(ab_rows, "AB_grade")
     _export_group(pot_rows, "Potential_Top20")
     _export_group(g7_rows, "Score7plus")
 
@@ -223,6 +280,10 @@ def export_tv_watchlists(
     if b_rows:
         write_tv_sector_industry_txt(
             b_rows, out_dir / "B_grade_by_sector_industry.txt", group_label="B_Grade"
+        )
+    if ab_rows:
+        write_tv_sector_industry_txt(
+            ab_rows, out_dir / "AB_grade_by_sector_industry.txt", group_label="AB_Grade"
         )
 
     sector_dir = out_dir / "A_by_sector"
@@ -241,6 +302,8 @@ def export_tv_watchlists(
     fields = [
         "symbol", "tv_ticker", "sector", "industry", "description",
         "grade", "decision", "score", "long", "short", "pot_long", "pot_price", "bias",
+        "shortlist", "breakout_entry", "retest_entry", "breakout_rr", "retest_rr", "best_rr",
+        "both_setups_valid",
     ]
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
@@ -299,6 +362,63 @@ def score_from_yf(symbol: str, market_edge: dict) -> dict | None:
     )
 
 
+def _format_ab_shortlist_section(ab_list: list[dict]) -> list[str]:
+    if not ab_list:
+        return [
+            "## A/B 級 — 雙 Setup 短名單",
+            "",
+            f"*（0 隻符合：Grade A/B + Breakout & Retest 都 valid + 至少一個 ≥{eng.SCREENER_MIN_BEST_RR:.0f}R）*",
+            "",
+        ]
+
+    lines = [
+        "## A/B 級 — 雙 Setup 短名單",
+        "",
+        f"**條件**：Grade A 或 B · Breakout + Retest 兩個 setup 都 valid · 至少一個 ≥{eng.SCREENER_MIN_BEST_RR:.0f}R",
+        "",
+        f"**共 {len(ab_list)} 隻**",
+        "",
+    ]
+
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for r in ab_list:
+        m = r.get("_meta") or {}
+        sec = m.get("sector") or "Unknown"
+        ind = m.get("industry") or "Unknown"
+        groups.setdefault((sec, ind), []).append(r)
+
+    for (sec, ind), grp in sorted(groups.items()):
+        lines.append(f"### {sec} — {ind}")
+        lines.append("")
+        lines.append(
+            "| Symbol | Grade | 現況 | Breakout RR | Retest RR | Best | Setup |"
+        )
+        lines.append(
+            "|--------|:-----:|:----:|:-----------:|:---------:|:----:|-------|"
+        )
+        for r in sorted(grp, key=lambda x: (-float(x.get("_setup_eval", {}).get("best_rr", 0)), -x["total_score"])):
+            setups = r.get("setups") or {}
+            bo = setups.get("breakout") or {}
+            rt = setups.get("retest") or {}
+            ev = r.get("_setup_eval") or eng.evaluate_screener_setups(setups)
+            setup_txt = (
+                f"B ${bo.get('entry', '—')} ({ev.get('breakout_rr', '—')}R) / "
+                f"R ${rt.get('entry', '—')} ({ev.get('retest_rr', '—')}R)"
+            )
+            lines.append(
+                f"| **{r['symbol']}** | {r['grade']} | {eng.edge_score_fmt(r['total_score'])} | "
+                f"{ev.get('breakout_rr', '—')} | {ev.get('retest_rr', '—')} | "
+                f"**{ev.get('best_rr', '—')}R** | {setup_txt} |"
+            )
+        lines.append("")
+
+    lines.append(
+        f"TV import：`reports/batch/tv_import/.../AB_grade_by_sector_industry.txt` 或 `AB_grade_comma.txt`",
+    )
+    lines.append("")
+    return lines
+
+
 def format_screener_summary(results: list[dict], source_name: str) -> str:
     today = date.today().isoformat()
     lines = [
@@ -317,6 +437,9 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
 
     a_list = [r for r in results if r["grade"] == "A" and r["decision"] == "trade"]
     b_list = [r for r in results if r["grade"] == "B"]
+    ab_list = [r for r in results if eng.passes_screener_shortlist(r)]
+    for r in ab_list:
+        r["_setup_eval"] = eng.evaluate_screener_setups(r.get("setups"))
     watch7 = [r for r in results if r["total_score"] >= 7 and r["grade"] != "A"]
 
     def _best_long_count(r: dict) -> int:
@@ -335,10 +458,13 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
         f"|------|------|",
         f"| **A 級（可交易）** | {len(a_list)} |",
         f"| **B 級（Watch）** | {len(b_list)} |",
-        f"| **現況 ≥7/9** | {len([r for r in results if r['total_score'] >= 7])} |",
+        f"| **A/B 雙 Setup ≥{eng.SCREENER_MIN_BEST_RR:.0f}R** | {len(ab_list)} |",
+        f"| **現況 ≥7/{eng.EDGE_SCORE_MAX}** | {len([r for r in results if r['total_score'] >= 7])} |",
         f"| **Long 偏向** | {len([r for r in results if r.get('directional_bias') == 'long'])} |",
         "",
     ]
+
+    lines += _format_ab_shortlist_section(ab_list)
 
     if a_list:
         lines += ["## A 級 — 可交易", ""]
@@ -356,8 +482,8 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
             sc = r.get("scenarios") or {}
             lines.append(
                 f"| **{sym}** | {m.get('sector', '—')} | {m.get('industry', '—')} | "
-                f"{r['total_score']}/9 | "
-                f"{sc.get('current_long', '—')}/9 | {sc.get('current_short', '—')}/9 | "
+                f"{eng.edge_score_fmt(r['total_score'])} | "
+                f"{eng.edge_score_fmt(sc.get('current_long', 0))} | {eng.edge_score_fmt(sc.get('current_short', 0))} | "
                 f"{setup_txt} | {note} |"
             )
         lines.append("")
@@ -369,10 +495,10 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
             sc = r.get("scenarios") or {}
             best = sc.get("best_long") or {}
             pot_p = f"${best['price']}" if best.get("price") else "—"
-            pot_l = f"{best['long_count']}/9" if best.get("long_count") else "—"
+            pot_l = eng.edge_score_fmt(best['long_count']) if best.get("long_count") else "—"
             lines.append(
-                f"| {r['symbol']} | {r['total_score']}/9 | "
-                f"{sc.get('current_long', '—')}/9 | {sc.get('current_short', '—')}/9 | "
+                f"| {r['symbol']} | {eng.edge_score_fmt(r['total_score'])} | "
+                f"{eng.edge_score_fmt(sc.get('current_long', 0))} | {eng.edge_score_fmt(sc.get('current_short', 0))} | "
                 f"{pot_p} | {pot_l} |"
             )
         if len(b_list) > 30:
@@ -385,8 +511,8 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
         b = r["scenarios"]["best_long"]
         sc = r.get("scenarios") or {}
         lines.append(
-            f"| {i} | **{r['symbol']}** | {r['total_score']}/9 | "
-            f"{sc.get('current_long', '—')}/9 | ${b['price']} | {b['long_count']}/9 | {r['grade']} |"
+            f"| {i} | **{r['symbol']}** | {eng.edge_score_fmt(r['total_score'])} | "
+            f"{eng.edge_score_fmt(sc.get('current_long', 0))} | ${b['price']} | {eng.edge_score_fmt(b['long_count'])} | {r['grade']} |"
         )
     lines.append("")
 
@@ -406,69 +532,47 @@ def format_screener_summary(results: list[dict], source_name: str) -> str:
     ):
         sc = r.get("scenarios") or {}
         best = sc.get("best_long") or {}
-        pot_l = f"{best['long_count']}/9" if best.get("long_count") else "—"
+        pot_l = eng.edge_score_fmt(best['long_count']) if best.get("long_count") else "—"
         lines.append(
-            f"| {r['symbol']} | {r['total_score']}/9 | "
-            f"{sc.get('current_long', '—')}/9 | {sc.get('current_short', '—')}/9 | "
+            f"| {r['symbol']} | {eng.edge_score_fmt(r['total_score'])} | "
+            f"{eng.edge_score_fmt(sc.get('current_long', 0))} | {eng.edge_score_fmt(sc.get('current_short', 0))} | "
             f"{pot_l} | {r['grade']} | {sc.get('bias', '—')} |"
         )
     return "\n".join(lines)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("csv", type=Path, help="TradingView screener export CSV")
-    parser.add_argument("--limit", type=int, default=0, help="Max symbols (0=all)")
-    parser.add_argument("--delay", type=float, default=0.15, help="Seconds between symbols")
-    parser.add_argument("--export-only", action="store_true", help="Re-export TV files from saved JSON")
-    args = parser.parse_args()
+ProgressCallback = Callable[[int, int, str], None]
 
-    stem = args.csv.stem
-    today = date.today().isoformat()
-    json_path = REPORTS / f"SCREENER_{stem}_{today}_results.json"
 
-    if args.export_only:
-        if not json_path.exists():
-            raise SystemExit(f"No cached results: {json_path}")
-        results = json.loads(json_path.read_text(encoding="utf-8"))
-        meta = meta_from_results(results)
-        if args.csv.exists():
-            meta = {**meta, **read_screener_meta(args.csv)}
-        export_dir = TV_EXPORT / f"{stem}_{today}"
-        export_tv_watchlists(results, meta, export_dir)
-        print(f"Exported TV watchlists -> {export_dir}")
-        return
+@dataclass
+class ScreenerRunResult:
+    ok: bool
+    error: str = ""
+    logs: list[str] = field(default_factory=list)
+    source_csv: Path | None = None
+    analyzed: int = 0
+    total_symbols: int = 0
+    skipped: int = 0
+    a_count: int = 0
+    b_count: int = 0
+    ab_count: int = 0
+    a_symbols: list[str] = field(default_factory=list)
+    b_symbols: list[str] = field(default_factory=list)
+    ab_symbols: list[str] = field(default_factory=list)
+    summary_path: Path | None = None
+    json_path: Path | None = None
+    export_dir: Path | None = None
+    summary_md: str = ""
 
-    meta = read_screener_meta(args.csv)
-    symbols = read_screener_symbols(args.csv)
-    if args.limit:
-        symbols = symbols[: args.limit]
 
-    REPORTS.mkdir(parents=True, exist_ok=True)
-    market_edge = eng.assess_broad_market_edge()
-    eng._MARKET_EDGE_CACHE = market_edge
-
-    results: list[dict] = []
-    skipped: list[str] = []
-    for i, sym in enumerate(symbols, 1):
-        try:
-            data = score_from_yf(sym, market_edge)
-            if data is None:
-                skipped.append(sym)
-                print(f"[{i}/{len(symbols)}] SKIP {sym} (no data)")
-                continue
-            data["_meta"] = meta.get(sym) or {}
-            results.append(data)
-            print(f"[{i}/{len(symbols)}] OK {sym} {data['total_score']}/9 Grade {data['grade']}")
-        except Exception as e:
-            skipped.append(sym)
-            print(f"[{i}/{len(symbols)}] ERR {sym}: {e}")
-        if args.delay and i < len(symbols):
-            time.sleep(args.delay)
-
-    slim = []
+def _slim_results(results: list[dict]) -> list[dict]:
+    slim: list[dict] = []
     for r in results:
         sc = r.get("scenarios") or {}
+        setups = r.get("setups") or {}
+        bo = setups.get("breakout") or {}
+        rt = setups.get("retest") or {}
+        setup_ev = eng.evaluate_screener_setups(setups)
         slim.append({
             "symbol": r["symbol"],
             "total_score": r["total_score"],
@@ -481,24 +585,197 @@ def main() -> None:
                 "bias": sc.get("bias"),
                 "best_long": sc.get("best_long"),
             },
+            "setups": {
+                "breakout": {
+                    "entry": bo.get("entry"),
+                    "rr": bo.get("rr"),
+                    "valid": bo.get("valid"),
+                },
+                "retest": {
+                    "entry": rt.get("entry"),
+                    "rr": rt.get("rr"),
+                    "valid": rt.get("valid"),
+                },
+            },
+            "setup_eval": setup_ev,
+            "shortlist": eng.passes_screener_shortlist(r),
             "_meta": r.get("_meta") or {},
         })
-    json_path.write_text(json.dumps(slim, ensure_ascii=False, indent=2), encoding="utf-8")
+    return slim
 
-    out = REPORTS / f"SCREENER_{stem}_{today}_summary.md"
-    out.write_text(format_screener_summary(results, args.csv.name), encoding="utf-8")
+
+def _grade_counts(results: list[dict]) -> tuple[list[str], list[str], list[str]]:
+    a = [r["symbol"] for r in results if r["grade"] == "A"]
+    b = [r["symbol"] for r in results if r["grade"] == "B"]
+    ab = [r["symbol"] for r in results if eng.passes_screener_shortlist(r)]
+    return a, b, ab
+
+
+def export_screener_from_cache(csv_path: Path) -> ScreenerRunResult:
+    """Re-export TV watchlists from saved JSON (CLI --export-only)."""
+    logs: list[str] = []
+    if not csv_path.exists():
+        return ScreenerRunResult(ok=False, error=f"檔案不存在：{csv_path}", logs=logs)
+
+    stem = csv_path.stem
+    today = date.today().isoformat()
+    json_path = REPORTS / f"SCREENER_{stem}_{today}_results.json"
+    if not json_path.exists():
+        return ScreenerRunResult(
+            ok=False,
+            error=f"搵唔到快取 JSON：{json_path.name}",
+            logs=logs,
+            source_csv=csv_path,
+        )
+
+    raw = json.loads(json_path.read_text(encoding="utf-8"))
+    results = [dict(r) for r in raw]
+    meta = meta_from_results(results)
+    meta = {**meta, **read_screener_meta(csv_path)}
+    export_dir = TV_EXPORT / f"{stem}_{today}"
+    export_tv_watchlists(results, meta, export_dir)
+    a, b, ab = _grade_counts(results)
+    logs.append(f"Re-export TV watchlists -> {export_dir}")
+    return ScreenerRunResult(
+        ok=True,
+        logs=logs,
+        source_csv=csv_path,
+        analyzed=len(results),
+        total_symbols=len(results),
+        a_count=len(a),
+        b_count=len(b),
+        ab_count=len(ab),
+        a_symbols=a,
+        b_symbols=b,
+        ab_symbols=ab,
+        json_path=json_path,
+        export_dir=export_dir,
+    )
+
+
+def run_screener(
+    csv_path: Path,
+    *,
+    limit: int = 0,
+    delay: float = 0.15,
+    progress_callback: ProgressCallback | None = None,
+) -> ScreenerRunResult:
+    """Screen a TradingView screener CSV with yfinance OHLCV (UI / library entry)."""
+    logs: list[str] = [f"Screener CSV: {csv_path}"]
+    if not csv_path.exists():
+        msg = f"檔案不存在：{csv_path}"
+        logs.append(msg)
+        return ScreenerRunResult(ok=False, error=msg, logs=logs, source_csv=csv_path)
+
+    stem = csv_path.stem
+    today = date.today().isoformat()
+    json_path = REPORTS / f"SCREENER_{stem}_{today}_results.json"
+    meta = read_screener_meta(csv_path)
+    symbols = read_screener_symbols(csv_path)
+    if limit:
+        symbols = symbols[:limit]
+
+    total = len(symbols)
+    if not total:
+        msg = "CSV 內冇有效 Symbol"
+        logs.append(msg)
+        return ScreenerRunResult(ok=False, error=msg, logs=logs, source_csv=csv_path)
+
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    market_edge = eng.assess_broad_market_edge()
+    eng._MARKET_EDGE_CACHE = market_edge
+
+    results: list[dict] = []
+    skipped: list[str] = []
+    for i, sym in enumerate(symbols, 1):
+        line = f"[{i}/{total}] {sym}"
+        if progress_callback:
+            progress_callback(i, total, sym)
+        try:
+            data = score_from_yf(sym, market_edge)
+            if data is None:
+                skipped.append(sym)
+                logs.append(f"{line} SKIP (no data)")
+                continue
+            data["_meta"] = meta.get(sym) or {}
+            results.append(data)
+            logs.append(
+                f"{line} OK {eng.edge_score_fmt(data['total_score'])} Grade {data['grade']}"
+            )
+        except Exception as e:
+            skipped.append(sym)
+            logs.append(f"{line} ERR: {e}")
+        if delay and i < total:
+            time.sleep(delay)
+
+    json_path.write_text(
+        json.dumps(_slim_results(results), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    summary_path = REPORTS / f"SCREENER_{stem}_{today}_summary.md"
+    summary_md = format_screener_summary(results, csv_path.name)
+    summary_path.write_text(summary_md, encoding="utf-8")
 
     export_dir = TV_EXPORT / f"{stem}_{today}"
     export_tv_watchlists(results, meta, export_dir)
 
-    print(f"\nAnalyzed {len(results)} / {len(symbols)} | Skipped {len(skipped)}")
-    print(f"Summary -> {out}")
-    print(f"TV import files -> {export_dir}")
-    print(f"Results JSON -> {json_path}")
-    a = [r["symbol"] for r in results if r["grade"] == "A"]
-    b = [r["symbol"] for r in results if r["grade"] == "B"]
+    a, b, ab = _grade_counts(results)
+    logs.append(f"Analyzed {len(results)} / {total} | Skipped {len(skipped)}")
+    logs.append(f"Summary -> {summary_path}")
+    logs.append(f"TV import -> {export_dir}")
+    logs.append(f"JSON -> {json_path}")
+
+    return ScreenerRunResult(
+        ok=True,
+        logs=logs,
+        source_csv=csv_path,
+        analyzed=len(results),
+        total_symbols=total,
+        skipped=len(skipped),
+        a_count=len(a),
+        b_count=len(b),
+        ab_count=len(ab),
+        a_symbols=a,
+        b_symbols=b,
+        ab_symbols=ab,
+        summary_path=summary_path,
+        json_path=json_path,
+        export_dir=export_dir,
+        summary_md=summary_md,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("csv", type=Path, help="TradingView screener export CSV")
+    parser.add_argument("--limit", type=int, default=0, help="Max symbols (0=all)")
+    parser.add_argument("--delay", type=float, default=0.15, help="Seconds between symbols")
+    parser.add_argument("--export-only", action="store_true", help="Re-export TV files from saved JSON")
+    args = parser.parse_args()
+
+    if args.export_only:
+        result = export_screener_from_cache(args.csv)
+        if not result.ok:
+            raise SystemExit(result.error)
+        for line in result.logs:
+            print(line)
+        return
+
+    result = run_screener(
+        args.csv,
+        limit=args.limit,
+        delay=args.delay,
+        progress_callback=lambda i, n, sym: print(f"[{i}/{n}] {sym}"),
+    )
+    if not result.ok:
+        raise SystemExit(result.error)
+    for line in result.logs:
+        print(line)
+    a, b, ab = result.a_symbols, result.b_symbols, result.ab_symbols
     print(f"A ({len(a)}): {', '.join(a[:12])}{'...' if len(a) > 12 else ''}")
     print(f"B ({len(b)}): {', '.join(b[:12])}{'...' if len(b) > 12 else ''}")
+    print(f"AB shortlist ({len(ab)}): {', '.join(ab[:12])}{'...' if len(ab) > 12 else ''}")
 
 
 if __name__ == "__main__":

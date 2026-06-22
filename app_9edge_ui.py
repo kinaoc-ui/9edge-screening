@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
+import screen_screener_csv as screener
 from edge_common import (
     csv_exists,
     get_csv_dir,
@@ -63,6 +66,251 @@ def run_pipeline(*args, **kwargs):
 
 def run_screener_analysis(*args, **kwargs):
     return _tv().run_screener_analysis(*args, **kwargs)
+
+
+def import_watchlist_from_txt(*args, **kwargs):
+    return _tv().import_watchlist_from_txt(*args, **kwargs)
+
+
+def open_path_in_explorer(path: Path) -> tuple[bool, str]:
+    """Open a file or folder in the OS file manager (local only)."""
+    if not path.exists():
+        return False, f"路徑不存在：{path}"
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+        return True, f"已開啟 {path}"
+    except Exception as e:
+        return False, str(e)
+
+
+def resolve_screener_csv(
+    *,
+    uploaded,
+    path_text: str,
+    default_csv: Path | None,
+) -> Path | None:
+    if uploaded:
+        tmp = ROOT / "screener" / uploaded.name
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(uploaded.getvalue())
+        return tmp
+    custom = (path_text or "").strip().strip('"')
+    if custom:
+        p = Path(custom).expanduser()
+        if p.is_file():
+            return p
+    return default_csv
+
+
+def render_tv_watchlist_import(
+    *,
+    key_prefix: str,
+    default_export_dir: Path | None = None,
+) -> None:
+    """Pick a screener export .txt and download or push to TradingView watchlist."""
+    st.markdown("**📥 TV Watchlist 匯入**")
+    st.caption(
+        "揀 `tv_import` 入面嘅 comma 清單 → 下載手動 import，或經 MCP 逐隻加入而家嘅 TV watchlist"
+        "（要 TradingView Desktop + CDP 9222）"
+    )
+
+    export_dirs = screener.list_tv_export_dirs()
+    if default_export_dir and default_export_dir.is_dir():
+        if default_export_dir not in export_dirs:
+            export_dirs = [default_export_dir, *export_dirs]
+
+    if not export_dirs:
+        st.info("未有 `reports/batch/tv_import/` 輸出。先跑 Screener 選股，或用 `--export-only` 匯出。")
+        return
+
+    dir_labels = [p.name for p in export_dirs]
+    default_idx = 0
+    if default_export_dir and default_export_dir in export_dirs:
+        default_idx = export_dirs.index(default_export_dir)
+
+    picked_dir = export_dirs[
+        st.selectbox(
+            "批次資料夾",
+            range(len(export_dirs)),
+            format_func=lambda i: dir_labels[i],
+            index=default_idx,
+            key=f"{key_prefix}_tv_export_dir",
+        )
+    ]
+
+    option_files = [f for f, _ in screener.TV_WATCHLIST_IMPORT_OPTIONS]
+    option_labels = {f: label for f, label in screener.TV_WATCHLIST_IMPORT_OPTIONS}
+    available = [f for f in option_files if (picked_dir / f).is_file()]
+    if not available:
+        st.warning(f"`{picked_dir.name}` 入面冇 comma watchlist 檔。")
+        if st.button("📂 開資料夾", key=f"{key_prefix}_tv_open_empty"):
+            ok, msg = open_path_in_explorer(picked_dir)
+            if ok:
+                st.toast(msg, icon="📂")
+            else:
+                st.session_state["last_error"] = msg
+        return
+
+    default_list = "AB_grade_comma.txt" if "AB_grade_comma.txt" in available else available[0]
+    list_file = st.selectbox(
+        "清單類型",
+        available,
+        index=available.index(default_list),
+        format_func=lambda f: option_labels.get(f, f),
+        key=f"{key_prefix}_tv_list_file",
+    )
+    list_path = picked_dir / list_file
+    symbols = screener.parse_comma_watchlist(list_path)
+    st.caption(f"`{list_path.name}` · **{len(symbols)}** 隻 · `{list_path}`")
+
+    if symbols:
+        preview = ", ".join(symbols[:8])
+        st.caption(f"預覽：{preview}{'…' if len(symbols) > 8 else ''}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.download_button(
+            "⬇️ 下載 .txt",
+            data=list_path.read_text(encoding="utf-8"),
+            file_name=list_file,
+            mime="text/plain",
+            use_container_width=True,
+            key=f"{key_prefix}_tv_dl",
+        )
+    with c2:
+        if st.button("📂 開資料夾", use_container_width=True, key=f"{key_prefix}_tv_open_dir"):
+            ok, msg = open_path_in_explorer(picked_dir)
+            if ok:
+                st.toast(msg, icon="📂")
+            else:
+                st.session_state["last_error"] = msg
+    with c3:
+        if st.button("📄 開選中檔案", use_container_width=True, key=f"{key_prefix}_tv_open_file"):
+            ok, msg = open_path_in_explorer(list_path)
+            if ok:
+                st.toast(msg, icon="📂")
+            else:
+                st.session_state["last_error"] = msg
+    with c4:
+        import_disabled = not symbols or not cdp_available()
+        if st.button(
+            "📥 加入 TV Watchlist",
+            use_container_width=True,
+            disabled=import_disabled,
+            key=f"{key_prefix}_tv_import",
+            help="經 MCP 逐隻加入而家 active 嘅 watchlist（Pro 手動 import 仍可用下載檔）",
+        ):
+            progress = st.progress(0.0, text="匯入 TV watchlist…")
+            status = st.empty()
+
+            def on_progress(i: int, total: int, sym: str) -> None:
+                progress.progress(i / total, text=f"[{i}/{total}] {sym}")
+                status.caption(f"加入 **{sym}**…")
+
+            with st.spinner(f"匯入 {len(symbols)} 隻去 TV…"):
+                added, total, errors, logs = import_watchlist_from_txt(
+                    list_path,
+                    progress_callback=on_progress,
+                )
+            progress.empty()
+            status.empty()
+            append_logs(logs)
+            if added == total:
+                st.toast(f"✅ 已加入 {added} 隻", icon="✅")
+                st.session_state.pop("last_error", None)
+            elif added:
+                st.toast(f"部分完成：{added}/{total}", icon="⚠️")
+                st.session_state["last_error"] = "\n".join(errors[:5])
+            else:
+                st.session_state["last_error"] = errors[0] if errors else "匯入失敗"
+
+    if not cdp_available():
+        st.caption("⚠️ CDP 未連線 — 可用「下載 .txt」去 TV Watchlist → ⋯ → Import list")
+
+
+def render_screener_results(result: screener.ScreenerRunResult) -> None:
+    """Show A/B/AB counts, output paths, downloads (after screener run)."""
+    st.success(
+        f"✅ 完成 — 分析 {result.analyzed}/{result.total_symbols} 隻"
+        + (f"（跳過 {result.skipped}）" if result.skipped else "")
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("A 級", result.a_count)
+    with c2:
+        st.metric("B 級", result.b_count)
+    with c3:
+        st.metric("AB 短名單", result.ab_count)
+    with c4:
+        st.metric("跳過", result.skipped)
+
+    if result.a_symbols:
+        st.caption(f"A：{', '.join(result.a_symbols[:20])}{'…' if len(result.a_symbols) > 20 else ''}")
+    if result.ab_symbols:
+        st.caption(f"AB：{', '.join(result.ab_symbols[:20])}{'…' if len(result.ab_symbols) > 20 else ''}")
+
+    st.caption("輸出檔案")
+    if result.summary_path and result.summary_path.exists():
+        st.text(f"摘要 · {result.summary_path}")
+    if result.json_path and result.json_path.exists():
+        st.text(f"JSON · {result.json_path}")
+    if result.export_dir and result.export_dir.exists():
+        st.text(f"TV import · {result.export_dir}")
+
+    if result.summary_md:
+        st.download_button(
+            "⬇️ 下載摘要 (.md)",
+            data=result.summary_md,
+            file_name=result.summary_path.name if result.summary_path else "screener_summary.md",
+            mime="text/markdown",
+            key="screener_dl_summary",
+        )
+
+    st.divider()
+    render_tv_watchlist_import(
+        key_prefix="screener_result",
+        default_export_dir=result.export_dir,
+    )
+
+
+def run_local_screener(csv_path: Path, *, limit: int = 0) -> None:
+    progress = st.progress(0.0, text="準備 Screener…")
+    status = st.empty()
+
+    def on_progress(i: int, total: int, sym: str) -> None:
+        progress.progress(i / total, text=f"[{i}/{total}] {sym}")
+        status.caption(f"yfinance 分析緊 **{sym}**…")
+
+    with st.spinner(f"Screener 跑緊（{csv_path.name}，可能 5–15 分鐘）…"):
+        result = screener.run_screener(csv_path, limit=limit, progress_callback=on_progress)
+
+    progress.empty()
+    status.empty()
+    append_logs(result.logs)
+    st.session_state["last_screener_result"] = result
+
+    if result.ok:
+        st.session_state.pop("last_error", None)
+        title = report_label(result.summary_path) if result.summary_path else "Screener 摘要"
+        set_view_report(
+            result.summary_path,
+            result.summary_md,
+            title,
+            analyzed=True,
+            symbol="SCREENER",
+        )
+        st.toast(
+            f"✅ A {result.a_count} · B {result.b_count} · AB {result.ab_count}",
+            icon="✅",
+        )
+        st.rerun()
+    else:
+        st.session_state["last_error"] = result.error
 
 st.set_page_config(
     page_title="9-Edge Screening",
@@ -472,7 +720,7 @@ def run_csv_analysis(
     st.session_state["last_logs"] = logs
     if result.ok:
         title = (
-            f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
+            f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
             f"({result.decision})"
         )
         set_view_report(
@@ -497,7 +745,7 @@ def run_yfinance_analysis(sym: str) -> None:
     st.session_state["last_logs"] = result.logs
     if result.ok:
         title = (
-            f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
+            f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
             f"({result.decision})"
         )
         set_view_report(
@@ -734,7 +982,7 @@ def render_local_toolbar(
         st.session_state["last_logs"] = result.logs
         if result.ok:
             title = (
-                f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
+                f"{result.symbol} — {screener.eng.edge_score_fmt(result.total_score)} Grade {result.grade} "
                 f"({result.decision})"
             )
             set_view_report(
@@ -785,42 +1033,56 @@ def render_local_toolbar(
             else:
                 st.session_state["last_error"] = "搵唔到 SCREENER_*_summary.md"
 
-    st.markdown("**🔍 跑 Screener 選股**（TradingView Screener CSV → 全 batch 評分）")
+    st.markdown("**🔍 Screener 選股**（TradingView Screener CSV → yfinance 全 batch 評分）")
     default_csv = find_latest_screener_csv()
     if default_csv:
         st.caption(f"偵測到最新 CSV：`{default_csv.name}`（{default_csv.parent.name}/）")
     screener_upload = st.file_uploader(
-        "Screener CSV（留空就用上面預設）",
+        "上載 Screener CSV（留空就用預設或路徑）",
         type=["csv"],
         key=f"{key_prefix}_screener_csv_upload",
+    )
+    screener_path_text = st.text_input(
+        "或輸入本機 CSV 路徑",
+        value="",
+        placeholder=str(default_csv) if default_csv else r"C:\...\new_2026-06-18.csv",
+        key=f"{key_prefix}_screener_path",
+    )
+    screener_limit = st.number_input(
+        "試跑上限（0 = 全部）",
+        min_value=0,
+        max_value=5000,
+        value=0,
+        step=10,
+        help="測試用，例如 10 隻；正式跑留 0",
+        key=f"{key_prefix}_screener_limit",
     )
     if st.button(
         "🔍 開始 Screener 選股",
         use_container_width=True,
         key=f"{key_prefix}_screener_run",
     ):
-        if screener_upload:
-            tmp = ROOT / "screener" / screener_upload.name
-            tmp.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_bytes(screener_upload.getvalue())
-            csv_path = tmp
-        elif default_csv:
-            csv_path = default_csv
+        csv_path = resolve_screener_csv(
+            uploaded=screener_upload,
+            path_text=screener_path_text,
+            default_csv=default_csv,
+        )
+        if not csv_path:
+            st.session_state["last_error"] = (
+                "請上載 Screener CSV、輸入本機路徑，或放 new_*.csv 喺 ../ 或 screener/"
+            )
+        elif not csv_path.exists():
+            st.session_state["last_error"] = f"搵唔到 CSV：{csv_path}"
         else:
-            st.session_state["last_error"] = "請上載 Screener CSV，或放 new_*.csv 喺 ../ 或 screener/"
-            csv_path = None
-        if csv_path:
-            with st.spinner(f"Screener 分析中（{csv_path.name}，可能 5–15 分鐘）..."):
-                ok, msg, logs = run_screener_analysis(csv_path)
-            append_logs(logs)
-            if ok:
-                st.toast(msg, icon="✅")
-                p = latest_batch_summary()
-                if p:
-                    set_view_report(p, load_report(p), report_label(p))
-                st.session_state.pop("last_error", None)
-            else:
-                st.session_state["last_error"] = msg
+            run_local_screener(csv_path, limit=int(screener_limit))
+
+    if prev := st.session_state.get("last_screener_result"):
+        if isinstance(prev, screener.ScreenerRunResult) and prev.ok:
+            with st.expander("📊 上次 Screener 結果", expanded=True):
+                render_screener_results(prev)
+    elif screener.list_tv_export_dirs():
+        with st.expander("📥 TV Watchlist 匯入（已有匯出）", expanded=False):
+            render_tv_watchlist_import(key_prefix="tv_import_tool")
 
     st.divider()
     st.subheader("💰 RRR · 風險回報計算")
