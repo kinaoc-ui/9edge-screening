@@ -4345,35 +4345,24 @@ def edges_dict_from_block(block: dict, direction: str = "long") -> dict:
     return out
 
 
-def score_symbol(
+def score_from_bars(
     symbol: str,
-    d1_path: Path,
-    w1_path: Path | None = None,
-    h1_path: Path | None = None,
+    d1_bars: list[dict],
+    *,
+    w1_bars: list[dict] | None = None,
+    h1_bars: list[dict] | None = None,
     market_edge: dict | None = None,
+    source: str = "CSV",
 ) -> dict:
+    """Single scoring path for CSV and yfinance — same report structure."""
     sym = symbol.upper()
-    w1_path = w1_path or CSV_DIR / f"{sym}_W1.csv"
-    h1_path = h1_path or CSV_DIR / f"{sym}_H1.csv"
-
-    bars = parse_bars(load_tv_csv(d1_path))
+    bars = d1_bars
     d1 = analyze_bars(bars)
 
-    w1 = None
-    w1_bars = None
-    if w1_path.exists():
-        w1_bars = parse_bars(load_tv_csv(w1_path), min_bars=TF_MIN_BARS["W1"])
-        w1 = analyze_bars(w1_bars)
-
-    h1 = None
-    h1_bars = None
-    if h1_path.exists():
-        h1_bars = parse_bars(load_tv_csv(h1_path), min_bars=TF_MIN_BARS["H1"])
-        h1 = analyze_bars(h1_bars)
-
+    w1 = analyze_bars(w1_bars) if w1_bars else None
+    h1 = analyze_bars(h1_bars) if h1_bars else None
     d1 = merge_swing_sr(d1, bars, w1=w1, w1_bars=w1_bars, h1=h1, h1_bars=h1_bars)
 
-    # Edge #9 M.I.: user update => MACD breakout only, W1 prioritized.
     mi_source_tf = "W1" if w1 else "D1"
     mi_ref = w1 or d1
     mi_canonical = mi_ref.get("mi_detail") or {
@@ -4396,7 +4385,7 @@ def score_symbol(
     board_short = market["short_pass"]
     board_long_note = market["long_note"]
     board_short_note = market["short_note"]
-    sector_footnote = fetch_sector_footnote(symbol)
+    sector_footnote = fetch_sector_footnote(sym)
     plan = build_rr_plan(d1, bars)
 
     cross = dict(
@@ -4422,21 +4411,6 @@ def score_symbol(
         if analysis is None or tf_bars is None:
             continue
         tf_blocks[tf_label] = build_per_tf_block(tf_label, analysis, tf_bars, **cross)
-
-    def _tf_overview_at_price(price: float) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        for tf_label, src_bars in (
-            ("W1", w1_bars),
-            ("D1", bars),
-            ("H1", h1_bars),
-        ):
-            if not src_bars:
-                continue
-            sim = bars_at_price(src_bars, price)
-            sim_analysis = analyze_bars(sim)
-            sim_analysis = apply_mi_override(sim_analysis, mi_canonical, mi_source_tf)
-            out[tf_label] = build_per_tf_block(tf_label, sim_analysis, sim, **cross)
-        return out
 
     d1_block = tf_blocks.get("D1") or build_per_tf_block("D1", d1, bars, **cross)
     edges = edges_dict_from_block(d1_block, "long")
@@ -4470,11 +4444,15 @@ def score_symbol(
         tf_label = "D1"
 
     setups = build_setups(d1, bars)
-    for key in ("breakout", "retest"):
-        s = setups.get(key)
-        if not s or not s.get("entry"):
-            continue
-        s["edge_overview"] = _tf_overview_at_price(float(s["entry"]))
+    setups = attach_setup_edge_overviews(
+        setups,
+        w1_bars=w1_bars,
+        d1_bars=bars,
+        h1_bars=h1_bars,
+        mi_canonical=mi_canonical,
+        mi_source_tf=mi_source_tf,
+        cross=cross,
+    )
     data = {
         "symbol": sym,
         "timeframe": tf_label,
@@ -4507,10 +4485,37 @@ def score_symbol(
         "directional_bias": scenarios["bias"],
         "long_edge_count": scenarios["current_long"],
         "short_edge_count": scenarios["current_short"],
-        "source": "CSV",
+        "source": source,
     }
     data["summary_zh"] = build_summary_text(data)
     return data
+
+
+def score_symbol(
+    symbol: str,
+    d1_path: Path,
+    w1_path: Path | None = None,
+    h1_path: Path | None = None,
+    market_edge: dict | None = None,
+) -> dict:
+    sym = symbol.upper()
+    w1_path = w1_path or CSV_DIR / f"{sym}_W1.csv"
+    h1_path = h1_path or CSV_DIR / f"{sym}_H1.csv"
+
+    bars = parse_bars(load_tv_csv(d1_path))
+    w1_bars = (
+        parse_bars(load_tv_csv(w1_path), min_bars=TF_MIN_BARS["W1"])
+        if w1_path.exists()
+        else None
+    )
+    h1_bars = (
+        parse_bars(load_tv_csv(h1_path), min_bars=TF_MIN_BARS["H1"])
+        if h1_path.exists()
+        else None
+    )
+    return score_from_bars(
+        sym, bars, w1_bars=w1_bars, h1_bars=h1_bars, market_edge=market_edge, source="CSV"
+    )
 
 
 def _resolve_breakout_entry(d1: dict) -> tuple[float, str, str, str]:
@@ -4614,6 +4619,41 @@ def build_setups(d1: dict, bars: list[dict] | None = None) -> dict:
         "valid": bool(plan_b.get("stop") and plan_b["raw_rr"] >= 2),
     }
     return {"breakout": setup_a, "retest": setup_b}
+
+
+def attach_setup_edge_overviews(
+    setups: dict,
+    *,
+    w1_bars: list[dict] | None,
+    d1_bars: list[dict],
+    h1_bars: list[dict] | None,
+    mi_canonical: dict,
+    mi_source_tf: str,
+    cross: dict,
+) -> dict:
+    """Add edge_overview per Setup A/B price (for 3-table dashboard in format_md)."""
+
+    def _tf_overview_at_price(price: float) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for tf_label, src_bars in (
+            ("W1", w1_bars),
+            ("D1", d1_bars),
+            ("H1", h1_bars),
+        ):
+            if not src_bars:
+                continue
+            sim = bars_at_price(src_bars, price)
+            sim_analysis = analyze_bars(sim)
+            sim_analysis = apply_mi_override(sim_analysis, mi_canonical, mi_source_tf)
+            out[tf_label] = build_per_tf_block(tf_label, sim_analysis, sim, **cross)
+        return out
+
+    for key in ("breakout", "retest"):
+        s = setups.get(key)
+        if not s or not s.get("entry"):
+            continue
+        s["edge_overview"] = _tf_overview_at_price(float(s["entry"]))
+    return setups
 
 
 CORE_LABELS = {
@@ -5179,6 +5219,10 @@ def format_md(data: dict) -> str:
         one_line_conclusion(data),
         "",
     ]
+    src = data.get("source") or ""
+    if src:
+        src_zh = "TradingView CSV" if src == "CSV" else ("yfinance 自動拉數" if src == "yfinance" else src)
+        lines += [f"> 數據來源：**{src_zh}** — Cloud 用 yfinance；本機 TV CSV 最準。", ""]
 
     tfs = data.get("timeframes") or {}
     if tfs:

@@ -287,115 +287,16 @@ def score_from_yf(symbol: str, market_edge: dict) -> dict | None:
     d1_bars = yf_to_bars(sym, "1d", "2y", eng.TF_MIN_BARS["D1"])
     if not d1_bars:
         return None
-
     w1_bars = yf_to_bars(sym, "1wk", "5y", eng.TF_MIN_BARS["W1"])
     h1_bars = yf_to_bars(sym, "60m", "60d", eng.TF_MIN_BARS["H1"])
-
-    d1 = eng.analyze_bars(d1_bars)
-    w1 = eng.analyze_bars(w1_bars) if w1_bars else None
-    h1 = eng.analyze_bars(h1_bars) if h1_bars else None
-    d1 = eng.merge_swing_sr(d1, d1_bars, w1=w1, w1_bars=w1_bars, h1=h1, h1_bars=h1_bars)
-
-    mi_source_tf = "W1" if w1 else "D1"
-    mi_ref = w1 or d1
-    mi_canonical = mi_ref.get("mi_detail") or {
-        "long_pass": bool(mi_ref.get("mi_pass")),
-        "short_pass": bool(mi_ref.get("mi_short_pass")),
-        "long_note": "MACD breakout 未確認",
-        "short_note": "MACD breakout 未確認",
-    }
-    d1 = eng.apply_mi_override(d1, mi_canonical, mi_source_tf)
-    if w1:
-        w1 = eng.apply_mi_override(w1, mi_canonical, mi_source_tf)
-    if h1:
-        h1 = eng.apply_mi_override(h1, mi_canonical, mi_source_tf)
-
-    mtf_pass, mtf_short, mtf_note = eng.analyze_mtf_cross(w1, d1, h1)
-    rs = eng.assess_relative_strength(sym, d1_bars)
-    board_long = market_edge["long_pass"]
-    board_short = market_edge["short_pass"]
-    board_long_note = market_edge["long_note"]
-    board_short_note = market_edge["short_note"]
-    sector_footnote = eng.fetch_sector_footnote(sym)
-    plan = eng.build_rr_plan(d1, d1_bars)
-
-    cross = dict(
-        mtf_long=mtf_pass,
-        mtf_short=mtf_short,
-        mtf_note=mtf_note,
-        rs_long=rs["long_pass"],
-        rs_short=rs["short_pass"],
-        rs_note=rs["long_note"],
-        rs_short_note=rs["short_note"],
-        board_long=board_long,
-        board_short=board_short,
-        board_long_note=board_long_note,
-        board_short_note=board_short_note,
+    return eng.score_from_bars(
+        sym,
+        d1_bars,
+        w1_bars=w1_bars,
+        h1_bars=h1_bars,
+        market_edge=market_edge,
+        source="yfinance",
     )
-
-    tf_blocks: dict[str, dict] = {}
-    for tf_label, analysis, tf_bars in (
-        ("W1", w1, w1_bars),
-        ("D1", d1, d1_bars),
-        ("H1", h1, h1_bars),
-    ):
-        if analysis is None or tf_bars is None:
-            continue
-        tf_blocks[tf_label] = eng.build_per_tf_block(tf_label, analysis, tf_bars, **cross)
-
-    d1_block = tf_blocks.get("D1") or eng.build_per_tf_block("D1", d1, d1_bars, **cross)
-    edges = eng.edges_dict_from_block(d1_block, "long")
-    edges["csp_pa_vol"]["short_score"] = d1_block["short_edges"]["csp_pa_vol"]
-    edges["csp_pa_vol"]["short_note"] = d1_block["short_notes"]["csp_pa_vol"]
-
-    total, grade, decision = eng.grade_from_edges(edges)
-    base_long = d1_block["long_edges"]
-    base_short = d1_block["short_edges"]
-    long_edge_notes = d1_block["long_notes"]
-    short_edge_notes = d1_block["short_notes"]
-
-    for k in eng.EDGES:
-        if k != "csp_pa_vol":
-            edges[k]["short_score"] = base_short[k]
-            edges[k]["short_note"] = short_edge_notes[k]
-
-    scenarios = eng.build_edge_scenarios(
-        d1_bars, d1, rs["long_pass"], rs["short_pass"], board_long, board_short,
-        mtf_pass, mtf_short, base_long, base_short,
-        rs["long_note"], rs["short_note"], board_long_note, board_short_note, mtf_note,
-        mi_canonical, w1=w1, h1=h1,
-    )
-
-    present = [t for t in eng.TF_ORDER if t in tf_blocks]
-    tf_label = "+".join(present) if present else "D1"
-
-    data = {
-        "symbol": sym,
-        "timeframe": tf_label,
-        "price": d1["close"],
-        "volume": str(d1["volume"]),
-        "volume_avg": str(d1["avg_volume_20"]),
-        "metrics": d1_block["metrics"],
-        "timeframes": tf_blocks,
-        "rs_detail": rs,
-        "market_edge_detail": market_edge,
-        "sector_footnote": sector_footnote,
-        "edges": edges,
-        "short_edges": base_short,
-        "short_edge_notes": short_edge_notes,
-        "long_edge_notes": long_edge_notes,
-        "total_score": total,
-        "grade": grade,
-        "decision": decision,
-        "entry_plan": plan,
-        "scenarios": scenarios,
-        "directional_bias": scenarios["bias"],
-        "long_edge_count": scenarios["current_long"],
-        "short_edge_count": scenarios["current_short"],
-        "source": "yfinance",
-    }
-    data["summary_zh"] = eng.build_summary_text(data)
-    return data
 
 
 def format_screener_summary(results: list[dict], source_name: str) -> str:
