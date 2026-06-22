@@ -43,13 +43,12 @@ CSV_LABELS = ("W1", "D1", "H1")
 _CLOUD_CSV_DIR: Path | None = None
 
 
+from edge_common import is_cloud_environment as _edge_is_cloud
+
+
 def is_cloud_environment() -> bool:
     """True on Streamlit Community Cloud (no local TradingView CDP)."""
-    if os.environ.get("STREAMLIT_SHARING") == "1":
-        return True
-    if os.environ.get("STREAMLIT_CLOUD") == "1":
-        return True
-    return False
+    return _edge_is_cloud()
 
 
 def get_csv_dir(*, cloud: bool | None = None) -> Path:

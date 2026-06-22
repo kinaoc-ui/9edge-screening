@@ -64,7 +64,7 @@ st.set_page_config(
     page_title="9-Edge Screening",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed" if is_cloud_environment() else "expanded",
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -78,7 +78,14 @@ def detect_cloud_mode() -> bool:
         return True
     try:
         host = (st.context.headers.get("Host") or "").lower()
-        if "streamlit.app" in host or "share.streamlit.io" in host:
+        if any(
+            token in host
+            for token in (
+                "streamlit.app",
+                "share.streamlit.io",
+                "streamlit-community.cloud",
+            )
+        ):
             return True
     except Exception:
         pass
@@ -109,10 +116,38 @@ def load_guide(path: Path) -> str:
     return f"（搵唔到 {path.name}）"
 
 
-def set_view_report(path: Path | None, md: str, title: str) -> None:
+def set_view_report(
+    path: Path | None,
+    md: str,
+    title: str,
+    *,
+    analyzed: bool = False,
+) -> None:
     st.session_state["view_report"] = md
     st.session_state["view_title"] = title
     st.session_state["view_report_path"] = str(path) if path else ""
+    if analyzed:
+        st.session_state["just_analyzed"] = True
+
+
+def render_report_panel() -> bool:
+    """Main report area. Returns True if a report is shown."""
+    if not (report := st.session_state.get("view_report")):
+        return False
+
+    if st.session_state.pop("just_analyzed", False):
+        st.success("✅ 分析完成")
+
+    title = st.session_state.get("view_title", "Report")
+    st.markdown(f'<div id="nine-edge-report"></div>', unsafe_allow_html=True)
+    st.subheader(f"📄 {title}")
+    report_path = st.session_state.get("view_report_path", "")
+    if report_path:
+        p = Path(report_path)
+        if p.exists():
+            st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
+    st.markdown(report, unsafe_allow_html=True)
+    return True
 
 
 def append_logs(lines: list[str]) -> None:
@@ -280,9 +315,10 @@ def run_csv_analysis(
             f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
             f"({result.decision})"
         )
-        set_view_report(result.report_path, result.report_md, title)
+        set_view_report(result.report_path, result.report_md, title, analyzed=True)
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
+        st.toast(f"✅ {title}", icon="✅")
     else:
         st.session_state["last_error"] = result.error
 
@@ -300,19 +336,18 @@ def run_yfinance_analysis(sym: str) -> None:
             f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
             f"({result.decision})"
         )
-        set_view_report(result.report_path, result.report_md, title)
+        set_view_report(result.report_path, result.report_md, title, analyzed=True)
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
+        st.toast(f"✅ {title}", icon="✅")
     else:
         st.session_state["last_error"] = result.error
 
 
-def render_status_row(cloud_mode: bool, connected: bool, chart_sym: str, chart_tf: str) -> None:
+def render_status_row(connected: bool, chart_sym: str, chart_tf: str) -> None:
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        if cloud_mode:
-            st.info("☁️ Cloud — 輸入代號即分析")
-        elif connected:
+        if connected:
             st.success("✅ TV 已連線 (CDP 9222)")
         else:
             st.warning("⚠️ TV 未連線 — 撳「開 TradingView」")
@@ -324,26 +359,98 @@ def render_status_row(cloud_mode: bool, connected: bool, chart_sym: str, chart_t
             st.metric("Timeframe", chart_tf)
 
 
+def render_cloud_toolbar(default_sym: str = "") -> None:
+    c1, c2 = st.columns([5, 1])
+    with c1:
+        sym = st.text_input(
+            "股票代號",
+            value=default_sym,
+            placeholder="輸入代號，例如 WOLF、TSM、NVDA",
+            key="cloud_symbol_input",
+            label_visibility="collapsed",
+        )
+    with c2:
+        if st.button("🔍 分析", type="primary", use_container_width=True):
+            run_yfinance_analysis(sym or default_sym)
+
+
+def render_cloud_sidebar() -> None:
+    """Cloud sidebar — everything collapsed; main area stays clean."""
+    with st.expander("📄 報告庫", expanded=False):
+        recent = list_recent_reports()
+        if not recent:
+            st.caption("未有報告")
+        else:
+            labels = [report_label(p) for p in recent]
+            pick = st.selectbox(
+                "揀 report",
+                options=range(len(recent)),
+                format_func=lambda i: labels[i],
+                key="cloud_report_pick",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("載入", use_container_width=True, key="cloud_sidebar_load"):
+                    p = recent[pick]
+                    set_view_report(p, load_report(p), labels[pick])
+            with c2:
+                if st.button("最新", use_container_width=True, key="cloud_sidebar_latest"):
+                    p = recent[0]
+                    set_view_report(p, load_report(p), labels[0])
+
+    with st.expander("📤 進階", expanded=False):
+        st.caption("一般唔使開；要上傳 TradingView CSV 或 .md 報告先用。")
+        csv_sym = st.text_input("CSV 代號", value="WOLF", key="cloud_csv_sym").strip().upper()
+        uploaded_csvs = st.file_uploader(
+            "W1 / D1 / H1 CSV",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="cloud_csv_upload_multi",
+        )
+        uploaded_zip = st.file_uploader("或 ZIP", type=["zip"], key="cloud_csv_upload_zip")
+        if st.button("用 CSV 分析", use_container_width=True, key="cloud_csv_analyze"):
+            run_csv_analysis(
+                csv_sym,
+                cloud_mode=True,
+                uploaded_csvs=uploaded_csvs,
+                uploaded_zip=uploaded_zip,
+            )
+        md_upload = st.file_uploader("Markdown 報告 (.md)", type=["md"], key="cloud_md_upload")
+        if md_upload and st.button("載入上載報告", use_container_width=True, key="cloud_md_load"):
+            md_text = md_upload.read().decode("utf-8", errors="replace")
+            set_view_report(None, md_text, md_upload.name)
+
+    with st.expander("📖 使用指南", expanded=False):
+        st.markdown(load_guide(FRIEND_GUIDE))
+
+
 def render_sidebar_controls(cloud_mode: bool, symbol_override: str | None) -> tuple[str, list | None, object | None]:
+    if cloud_mode:
+        render_cloud_sidebar()
+        return None, "", None, None
+
     st.header("⚙️ 設定")
     symbol_override = st.text_input(
         "股票代號（可留空）",
         value=symbol_override or "",
-        placeholder="留空 = 用 TV 而家 chart" if not cloud_mode else "例如 WOLF、TSM、NVDA",
-        help="例如 WOLF、ETN；留空就分析 TradingView 而家開緊嗰隻。"
-        if not cloud_mode
-        else "輸入美股代號，撳「分析股票」— 唔使上傳 CSV。",
+        placeholder="留空 = 用 TV 而家 chart",
+        help="例如 WOLF、ETN；留空就分析 TradingView 而家開緊嗰隻。",
     ).strip() or None
 
     restore_tf = st.checkbox(
         "分析完還原 timeframe",
         value=True,
-        disabled=cloud_mode,
     )
     st.session_state["restore_tf"] = restore_tf
 
     st.divider()
     st.subheader("📄 報告庫")
+    csv_sym = st.text_input(
+        "CSV 代號",
+        value=(symbol_override or "WOLF").upper(),
+        placeholder="WOLF",
+    ).strip().upper()
+
     recent = list_recent_reports()
     if not recent:
         st.caption("未有報告")
@@ -366,32 +473,10 @@ def render_sidebar_controls(cloud_mode: bool, symbol_override: str | None) -> tu
 
     st.divider()
     st.subheader("📤 上載")
-    csv_sym = st.text_input(
-        "CSV 代號",
-        value=(symbol_override or "WOLF").upper(),
-        placeholder="WOLF",
-    ).strip().upper()
-
-    show_upload = (not cloud_mode) and (
-        not csv_exists(csv_sym, ROOT / "charts" / "csv")
-    )
+    show_upload = not csv_exists(csv_sym, ROOT / "charts" / "csv")
     uploaded_csvs = None
     uploaded_zip = None
-    if cloud_mode:
-        with st.expander("📤 進階：上傳 CSV（可選）"):
-            st.caption("一般用代號分析就得；要上傳 TradingView CSV 先開呢度。")
-            uploaded_csvs = st.file_uploader(
-                "W1 / D1 / H1 CSV",
-                type=["csv"],
-                accept_multiple_files=True,
-                key="csv_upload_multi",
-            )
-            uploaded_zip = st.file_uploader(
-                "或 ZIP",
-                type=["zip"],
-                key="csv_upload_zip",
-            )
-    elif show_upload:
+    if show_upload:
         st.caption("上載 TradingView 匯出嘅 W1/D1/H1 CSV（或 ZIP）— 本機未有 CSV 時需要。")
         uploaded_csvs = st.file_uploader(
             "W1 / D1 / H1 CSV",
@@ -411,60 +496,29 @@ def render_sidebar_controls(cloud_mode: bool, symbol_override: str | None) -> tu
         set_view_report(None, md_text, md_upload.name)
 
     st.divider()
-    with st.expander("📖 使用指南", expanded=cloud_mode):
-        if cloud_mode:
-            st.markdown(load_guide(FRIEND_GUIDE))
-        else:
-            st.markdown(load_guide(DEPLOY_GUIDE))
-            st.caption("朋友用 Streamlit Cloud link，唔使 ngrok / 唔使連你部機。")
+    with st.expander("📖 使用指南", expanded=False):
+        st.markdown(load_guide(DEPLOY_GUIDE))
+        st.caption("朋友用 Streamlit Cloud link，唔使 ngrok / 唔使連你部機。")
 
     return symbol_override, csv_sym, uploaded_csvs, uploaded_zip
 
 
-def render_local_launcher(
-    cloud_mode: bool,
+def render_local_toolbar(
     connected: bool,
     symbol_override: str | None,
     csv_sym: str,
     uploaded_csvs,
     uploaded_zip,
+    *,
+    key_prefix: str,
 ) -> None:
-    if cloud_mode:
-        st.subheader("☁️ 分析股票")
-        st.caption("輸入代號 → 撳分析。數據來自 yfinance，唔使上傳 CSV。")
-        cloud_sym = (symbol_override or csv_sym or "").upper()
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            cloud_input = st.text_input(
-                "股票代號",
-                value=cloud_sym,
-                placeholder="WOLF、TSM、NVDA…",
-                key="cloud_symbol_input",
-            )
-        with c2:
-            st.write("")
-            st.write("")
-            analyze_yf = st.button(
-                "🔍 分析股票",
-                type="primary",
-                use_container_width=True,
-            )
-        if analyze_yf:
-            run_yfinance_analysis(cloud_input or cloud_sym)
-
-        st.divider()
-        st.subheader("📋 Batch 摘要")
-        if st.button("載入最新 Screener 摘要", use_container_width=True):
-            p = latest_batch_summary()
-            if p:
-                set_view_report(p, load_report(p), report_label(p))
-            else:
-                st.session_state["last_error"] = "搵唔到 SCREENER_*_summary.md"
-        return
-
     st.subheader("📺 第一步 · 開 TradingView")
     st.caption("關閉 TradingView 後撳掣，等 CDP ready（約 5–10 秒）再分析。")
-    if st.button("📺 開 TradingView (CDP 9222)", use_container_width=True):
+    if st.button(
+        "📺 開 TradingView (CDP 9222)",
+        use_container_width=True,
+        key=f"{key_prefix}_launch_tv",
+    ):
         ok, msg = launch_tradingview_debug()
         append_logs([msg])
         if ok:
@@ -483,12 +537,14 @@ def render_local_launcher(
             use_container_width=True,
             disabled=tv_disabled,
             help="用 TV chart 拉 W1/D1/H1 → 9-edge 評分",
+            key=f"{key_prefix}_analyze_tv",
         )
     with c2:
         csv_btn = st.button(
             "🔄 單股 CSV 分析",
             use_container_width=True,
             help="用 charts/csv 現有 CSV 重新計分（唔使 TV）",
+            key=f"{key_prefix}_csv_analyze",
         )
 
     if analyze_btn:
@@ -504,9 +560,10 @@ def render_local_launcher(
                 f"{result.symbol} — {result.total_score}/9 Grade {result.grade} "
                 f"({result.decision})"
             )
-            set_view_report(result.report_path, result.report_md, title)
+            set_view_report(result.report_path, result.report_md, title, analyzed=True)
             st.session_state["last_result"] = result
             st.session_state.pop("last_error", None)
+            st.toast(f"✅ {title}", icon="✅")
         else:
             st.session_state["last_error"] = result.error
 
@@ -514,7 +571,7 @@ def render_local_launcher(
         sym = (symbol_override or csv_sym or "WOLF").upper()
         run_csv_analysis(
             sym,
-            cloud_mode=cloud_mode,
+            cloud_mode=False,
             uploaded_csvs=uploaded_csvs,
             uploaded_zip=uploaded_zip,
         )
@@ -523,7 +580,11 @@ def render_local_launcher(
     st.subheader("📦 第三步 · 批量")
     b1, b2 = st.columns(2)
     with b1:
-        if st.button("📦 Batch CSV 分析", use_container_width=True):
+        if st.button(
+            "📦 Batch CSV 分析",
+            use_container_width=True,
+            key=f"{key_prefix}_batch_csv",
+        ):
             with st.spinner("分析 charts/csv 全部股票..."):
                 ok, msg, logs = run_batch_csv_analysis()
             append_logs(logs)
@@ -533,7 +594,11 @@ def render_local_launcher(
             else:
                 st.session_state["last_error"] = msg
     with b2:
-        if st.button("📋 載入最新 Batch 摘要", use_container_width=True):
+        if st.button(
+            "📋 載入最新 Batch 摘要",
+            use_container_width=True,
+            key=f"{key_prefix}_load_batch",
+        ):
             p = latest_batch_summary()
             if p:
                 set_view_report(p, load_report(p), report_label(p))
@@ -547,9 +612,13 @@ def render_local_launcher(
     screener_upload = st.file_uploader(
         "Screener CSV（留空就用上面預設）",
         type=["csv"],
-        key="screener_csv_upload",
+        key=f"{key_prefix}_screener_csv_upload",
     )
-    if st.button("🔍 開始 Screener 選股", use_container_width=True):
+    if st.button(
+        "🔍 開始 Screener 選股",
+        use_container_width=True,
+        key=f"{key_prefix}_screener_run",
+    ):
         if screener_upload:
             tmp = ROOT / "screener" / screener_upload.name
             tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -579,9 +648,13 @@ def render_local_launcher(
     commit_msg = st.text_input(
         "Commit 訊息",
         value="Update batch reports and app",
-        key="git_commit_msg",
+        key=f"{key_prefix}_git_commit_msg",
     )
-    if st.button("🚀 Push 上 GitHub", use_container_width=True):
+    if st.button(
+        "🚀 Push 上 GitHub",
+        use_container_width=True,
+        key=f"{key_prefix}_git_push",
+    ):
         with st.spinner("git add / commit / push..."):
             ok, msg, logs = run_git_push(commit_msg.strip() or "Update batch reports and app")
         append_logs(logs)
@@ -592,53 +665,108 @@ def render_local_launcher(
             st.session_state["last_error"] = msg
 
 
+def render_tools_expander(
+    connected: bool,
+    symbol_override: str | None,
+    csv_sym: str,
+    uploaded_csvs,
+    uploaded_zip,
+    *,
+    expanded: bool,
+    key: str,
+) -> None:
+    with st.expander("🛠️ 工具", expanded=expanded, key=key):
+        render_local_toolbar(
+            connected,
+            symbol_override,
+            csv_sym,
+            uploaded_csvs,
+            uploaded_zip,
+            key_prefix=key,
+        )
+
+
+def main_cloud() -> None:
+    with st.sidebar:
+        render_cloud_sidebar()
+
+    render_cloud_toolbar()
+
+    if err := st.session_state.get("last_error"):
+        st.error(err)
+
+    render_report_panel()
+
+
+def main_local(
+    connected: bool,
+    chart_sym: str,
+    chart_tf_or_err: str,
+    symbol_override: str | None,
+    csv_sym: str,
+    uploaded_csvs,
+    uploaded_zip,
+) -> None:
+    st.title("9-Edge 主控台")
+    st.caption("雙擊 **9edge.bat** 開呢個頁面 — 所有功能撳掣就得，唔使揀 .bat")
+    render_status_row(connected, chart_sym, chart_tf_or_err)
+
+    if err := st.session_state.get("last_error"):
+        st.error(err)
+
+    has_report = bool(st.session_state.get("view_report"))
+    render_tools_expander(
+        connected,
+        symbol_override,
+        csv_sym,
+        uploaded_csvs,
+        uploaded_zip,
+        expanded=not has_report,
+        key="tools_top",
+    )
+
+    has_report = render_report_panel()
+
+    render_tools_expander(
+        connected,
+        symbol_override,
+        csv_sym,
+        uploaded_csvs,
+        uploaded_zip,
+        expanded=False,
+        key="tools_bottom",
+    )
+
+    if logs := st.session_state.get("last_logs"):
+        with st.expander("📋 執行 log", expanded=bool(st.session_state.get("last_error"))):
+            st.code("\n".join(logs))
+
+    if not has_report:
+        st.info("撳 **工具** 開始分析，或 Sidebar **報告庫** 載入 batch 摘要。")
+
+
 def main() -> None:
     cloud_mode = detect_cloud_mode()
     connected, chart_sym, chart_tf_or_err = tv_status_badge(cloud_mode)
 
-    st.title("9-Edge 主控台")
     if cloud_mode:
-        st.caption("Streamlit Cloud · 上載 CSV · 載入 batch 報告 · 9-edge 評分")
-    else:
-        st.caption("雙擊 **9edge.bat** 開呢個頁面 — 所有功能撳掣就得，唔使揀 .bat")
-
-    render_status_row(cloud_mode, connected, chart_sym, chart_tf_or_err)
-    st.divider()
+        main_cloud()
+        return
 
     with st.sidebar:
         symbol_override, csv_sym, uploaded_csvs, uploaded_zip = render_sidebar_controls(
             cloud_mode, None
         )
 
-    render_local_launcher(
-        cloud_mode,
+    main_local(
         connected,
+        chart_sym,
+        chart_tf_or_err,
         symbol_override,
         csv_sym,
         uploaded_csvs,
         uploaded_zip,
     )
-
-    if err := st.session_state.get("last_error"):
-        st.error(err)
-
-    if logs := st.session_state.get("last_logs"):
-        with st.expander("📋 執行 log", expanded=bool(st.session_state.get("last_error"))):
-            st.code("\n".join(logs))
-
-    st.divider()
-
-    if report := st.session_state.get("view_report"):
-        title = st.session_state.get("view_title", "Report")
-        st.subheader(f"📄 {title}")
-        report_path = st.session_state.get("view_report_path", "")
-        if report_path:
-            p = Path(report_path)
-            if p.exists():
-                st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
-        st.markdown(report, unsafe_allow_html=True)
-    else:
-        st.info("撳上面掣開始，或 Sidebar **報告庫** 載入 batch 摘要。")
 
 
 if __name__ == "__main__":

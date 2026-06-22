@@ -23,9 +23,19 @@ _CLOUD_CSV_DIR: Path | None = None
 
 
 def is_cloud_environment() -> bool:
+    """True on Streamlit Community Cloud (no local TradingView CDP)."""
+    if os.environ.get("NINE_EDGE_CLOUD") == "1":
+        return True
     if os.environ.get("STREAMLIT_SHARING") == "1":
         return True
     if os.environ.get("STREAMLIT_CLOUD") == "1":
+        return True
+    if os.environ.get("USER") == "appuser":
+        return True
+    home = os.environ.get("HOME", "")
+    if home.startswith("/home/appuser"):
+        return True
+    if Path("/mount/src").is_dir():
         return True
     return False
 
