@@ -153,6 +153,55 @@ def register_report(
     return rid
 
 
+def cloud_report_catalog() -> list[dict]:
+    """Session 報告 + Cloud 暫存 md 檔（分析後應出現喺報告庫）。"""
+    init_report_library()
+    catalog: list[dict] = list(st.session_state.get("report_library", []))
+    paths_in: set[str] = set()
+    for e in catalog:
+        if e.get("path"):
+            try:
+                paths_in.add(str(Path(e["path"]).resolve()))
+            except OSError:
+                paths_in.add(str(e["path"]))
+    for p in list_recent_reports():
+        if "_9edge_" not in p.name:
+            continue
+        ps = str(p.resolve())
+        if ps in paths_in:
+            continue
+        sym = p.stem.split("_")[0].upper()
+        catalog.append({
+            "id": f"disk:{ps}",
+            "title": f"{sym} — {report_label(p)}",
+            "md": "",
+            "path": ps,
+            "symbol": sym,
+            "ts": report_mtime_label(p),
+        })
+    return catalog
+
+
+def _resolve_catalog_entry(entry: dict) -> dict:
+    if entry.get("md"):
+        return entry
+    if path := entry.get("path"):
+        p = Path(path)
+        if p.exists():
+            resolved = dict(entry)
+            resolved["md"] = load_report(p)
+            return resolved
+    return entry
+
+
+def _apply_catalog_entry(entry: dict) -> None:
+    entry = _resolve_catalog_entry(entry)
+    st.session_state["active_report_id"] = entry["id"]
+    st.session_state["view_report"] = entry.get("md", "")
+    st.session_state["view_title"] = entry.get("title", "Report")
+    st.session_state["view_report_path"] = entry.get("path", "")
+
+
 def set_view_report(
     path: Path | None,
     md: str,
@@ -209,15 +258,15 @@ def _render_report_body(report: str, title: str, entry: dict | None = None) -> N
 
 def render_report_zone(*, empty_hint: str = "") -> bool:
     """Main 報告區 — session library; analysis auto-adds here."""
-    init_report_library()
-    lib: list[dict] = st.session_state.get("report_library", [])
+    catalog = cloud_report_catalog()
     has_legacy = bool(st.session_state.get("view_report"))
 
-    if not lib and not has_legacy:
+    if not catalog and not has_legacy:
         return False
 
     st.subheader("📄 報告區")
-    if not lib:
+
+    if not catalog:
         if empty_hint:
             st.caption(empty_hint)
         if report := st.session_state.get("view_report"):
@@ -231,21 +280,18 @@ def render_report_zone(*, empty_hint: str = "") -> bool:
     if st.session_state.pop("just_analyzed", False):
         st.success("✅ 分析完成 — 已自動加入報告區")
 
-    labels = [e["title"] for e in lib]
+    labels = [e["title"] for e in catalog]
     pick = st.selectbox(
         "報告列表",
-        range(len(lib)),
+        range(len(catalog)),
         format_func=lambda i: labels[i],
-        index=_report_entry_index(lib, st.session_state.get("active_report_id")),
+        index=_report_entry_index(catalog, st.session_state.get("active_report_id")),
         key="report_zone_pick",
         label_visibility="collapsed",
     )
-    entry = lib[pick]
-    st.session_state["active_report_id"] = entry["id"]
-    st.session_state["view_report"] = entry["md"]
-    st.session_state["view_title"] = entry["title"]
-    st.session_state["view_report_path"] = entry.get("path", "")
-    _render_report_body(entry["md"], entry["title"], entry)
+    entry = _resolve_catalog_entry(catalog[pick])
+    _apply_catalog_entry(entry)
+    _render_report_body(entry.get("md", ""), entry.get("title", "Report"), entry)
     return True
 
 
@@ -436,6 +482,7 @@ def run_csv_analysis(
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
         st.toast(f"✅ {title}", icon="✅")
+        st.rerun()
     else:
         st.session_state["last_error"] = result.error
 
@@ -460,6 +507,7 @@ def run_yfinance_analysis(sym: str) -> None:
         st.session_state["last_result"] = result
         st.session_state.pop("last_error", None)
         st.toast(f"✅ {title}", icon="✅")
+        st.rerun()
     else:
         st.session_state["last_error"] = result.error
 
@@ -495,23 +543,22 @@ def render_cloud_toolbar(default_sym: str = "") -> None:
 
 
 def render_cloud_sidebar() -> None:
-    """Cloud sidebar — session reports sync with main 報告區."""
-    with st.expander("📄 報告庫", expanded=False):
-        init_report_library()
-        lib = st.session_state.get("report_library", [])
-        if lib:
-            st.caption(f"今次 session：{len(lib)} 份 — 主區 **報告區** 會自動顯示")
-            labels = [e["title"] for e in lib]
+    """Cloud sidebar — session + disk reports in 報告庫."""
+    catalog = cloud_report_catalog()
+    with st.expander("📄 報告庫", expanded=bool(catalog)):
+        if catalog:
+            st.caption(f"共 {len(catalog)} 份（分析後自動加入）")
+            labels = [e["title"] for e in catalog]
             pick = st.selectbox(
-                "Session 報告",
-                range(len(lib)),
+                "報告",
+                range(len(catalog)),
                 format_func=lambda i: labels[i],
-                index=_report_entry_index(lib, st.session_state.get("active_report_id")),
+                index=_report_entry_index(catalog, st.session_state.get("active_report_id")),
                 key="cloud_lib_pick",
             )
-            st.session_state["active_report_id"] = lib[pick]["id"]
+            _apply_catalog_entry(catalog[pick])
         else:
-            st.caption("撳 **🔍 分析** 後會自動加入主區報告區")
+            st.caption("撳 **🔍 分析** 後會自動出現喺呢度")
 
         batch = [p for p in list_recent_reports() if "_summary" in p.name]
         if batch:
@@ -839,10 +886,10 @@ def render_tools_expander(
 
 
 def main_cloud() -> None:
+    render_cloud_toolbar()
+
     with st.sidebar:
         render_cloud_sidebar()
-
-    render_cloud_toolbar()
 
     if err := st.session_state.get("last_error"):
         st.error(err)
