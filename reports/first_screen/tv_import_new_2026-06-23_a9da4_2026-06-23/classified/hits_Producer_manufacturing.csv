@@ -1,0 +1,10 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+CARR,NYSE:CARR,Producer manufacturing,Industrial machinery,Carrier Global Corporation,A,W1,True,3,2,5,71.85,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+MAS,NYSE:MAS,Producer manufacturing,Building products,Masco Corporation,A,W1,True,3,2,5,73.58,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+AAON,NASDAQ:AAON,Producer manufacturing,Industrial machinery,"AAON, Inc.",A,W1,True,3,2,5,136.16,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+MIDD,NASDAQ:MIDD,Producer manufacturing,Industrial machinery,The Middleby Corporation,A,W1,True,3,2,5,166.65,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+ACMR,NASDAQ:ACMR,Producer manufacturing,Industrial machinery,"ACM Research, Inc.",A,W1,True,3,2,5,103.17,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+GTX,NASDAQ:GTX,Producer manufacturing,Auto parts: OEM,Garrett Motion Inc.,A,D1,True,2,3,5,34.49,W1 2/3：量價配合 | D1 3/3：MA轉上；量價配合
+USAR,NASDAQ:USAR,Producer manufacturing,Metal fabrication,"USA Rare Earth, Inc.",A,W1,True,3,2,5,24.12,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+YETI,NYSE:YETI,Producer manufacturing,Miscellaneous manufacturing,"YETI Holdings, Inc.",A,W1,True,3,2,5,47.94,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+TE,NYSE:TE,Producer manufacturing,Electrical products,T1 Energy Inc.,A,W1,True,3,2,5,10.4,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合

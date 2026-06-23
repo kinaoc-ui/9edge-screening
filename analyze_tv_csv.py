@@ -28,6 +28,10 @@ EDGES = [
 
 # MI 暫時只得 MACD — 計分關閉，報告仍顯示作參考（用戶自行喺 TV 睇）
 MI_EDGE_SCORING_ENABLED = False
+# F.T. 暫時唔計分（邏輯未 finetune 好）
+FT_EDGE_SCORING_ENABLED = False
+# R&R&S 暫時唔計分（Entry/Stop/Target 結構未 finetune）
+RRS_EDGE_SCORING_ENABLED = False
 _BME_SCORING_ENABLED = True
 
 
@@ -35,6 +39,10 @@ def _build_edge_score_keys(*, bme_scoring: bool = True) -> list[str]:
     keys = list(EDGES)
     if not MI_EDGE_SCORING_ENABLED:
         keys = [k for k in keys if k != "mi"]
+    if not FT_EDGE_SCORING_ENABLED:
+        keys = [k for k in keys if k != "ft"]
+    if not RRS_EDGE_SCORING_ENABLED:
+        keys = [k for k in keys if k != "rrs"]
     if not bme_scoring:
         keys = [k for k in keys if k != "board_edge"]
     return keys
@@ -76,6 +84,37 @@ H1_SCORING_ENABLED = False
 
 def active_tf_order() -> tuple[str, ...]:
     return TF_ORDER if H1_SCORING_ENABLED else ("W1", "D1")
+
+
+def edge_prefix(passed: bool, strong: bool = False) -> str:
+    if strong:
+        return "✅+ "
+    if passed:
+        return "✅ "
+    return ""
+
+
+def edge_status_label(passed: bool, strong: bool = False) -> str:
+    if strong:
+        return "✅+ 強勢通過"
+    if passed:
+        return "✅ 通過"
+    return "❌ 未過"
+
+
+def decorate_edge_note(note: str, passed: bool, strong: bool = False) -> str:
+    if not passed or not note:
+        return note
+    if note.startswith("✅"):
+        return note
+    return edge_prefix(passed, strong) + note
+
+
+def build_check_rows(items: list[tuple[str, str, bool, str]]) -> list[dict]:
+    return [
+        {"key": key, "label": label, "pass": ok, "note": detail}
+        for key, label, ok, detail in items
+    ]
 
 SECTOR_ETF = {
     "technology": "XLK",
@@ -220,15 +259,25 @@ def assess_mi_macd_breakout(bars: list[dict]) -> dict:
     else:
         short_note = "MACD（breakout only）：目前唔係跌破位"
 
+    mi_checks = [
+        ("breakout", "① 突破情境", breakout_up, "升破近期高" if breakout_up else "未有突破"),
+        ("macd_cross", "② MACD 交叉", bull_cross_recent, "近期金叉" if bull_cross_recent else "—"),
+        ("line_signal", "③ Line>Signal", line[-1] > sig[-1], f"{line[-1]:.3f}>{sig[-1]:.3f}"),
+        ("hist", "④ 柱體轉強", bull_momentum, f"hist {hist[-1]:.3f}"),
+    ]
+    long_strong = long_pass and all(c[2] for c in mi_checks)
+
     return {
         "long_pass": long_pass,
         "short_pass": short_pass,
+        "pass_strong": long_strong,
+        "check_rows": build_check_rows(mi_checks),
         "breakout_up": breakout_up,
         "breakout_down": breakout_down,
         "macd_line": round(line[-1], 4),
         "macd_signal": round(sig[-1], 4),
         "macd_hist": round(hist[-1], 4),
-        "long_note": long_note,
+        "long_note": decorate_edge_note(long_note, long_pass, long_strong),
         "short_note": short_note,
     }
 
@@ -659,6 +708,14 @@ def analyze_sr(bars: list[dict], tf_label: str = "") -> dict:
     in_zone = zone and zone["zone_lo"] <= c <= zone["zone_hi"]
 
     sr_pass = at_confluence or retest_as_support or (ma_bull and minor_cross)
+    sr_checks = [
+        ("confluence", "① 多源匯聚", bool(at_confluence), f"{zone['edge_count']}源" if at_confluence and zone else "未近匯聚區"),
+        ("retest", "② 突破回踩", retest_as_support, f"前浪頂{wave_top:.2f}→支持" if retest_as_support else "—"),
+        ("ma_support", "③ MA/企穩", ma_bull and (minor_cross or in_zone), "MA向上+企穩" if ma_bull else "—"),
+        ("not_mid", "④ 非中間位", not mid_range, "中間位" if mid_range else "唔係中間位"),
+        ("not_chase", "⑤ 非追價", not extended, f"距支撐{dist_support*100:.1f}%" if extended else "距離合理"),
+    ]
+    sr_strong = sr_pass and all(c[2] for c in sr_checks)
 
     notes = []
     tf_note = f"[{tf_label}] " if tf_label else ""
@@ -697,7 +754,9 @@ def analyze_sr(bars: list[dict], tf_label: str = "") -> dict:
 
     return {
         "pass": 1 if sr_pass else 0,
-        "note": "；".join(notes),
+        "pass_strong": sr_strong,
+        "check_rows": build_check_rows(sr_checks),
+        "note": decorate_edge_note("；".join(notes), bool(sr_pass), sr_strong),
         "swing_low": round(swing_20, 2),
         "resistance": round(resist_60, 2),
         "wave_top": round(wave_top, 2),
@@ -1015,21 +1074,18 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     }
     bear_score = sum(bear_checks.values())
 
-    core_pass = (
-        bull_checks["ma_aligned"]
-        and bull_checks["wave_structure"]
-        and bull_checks["large_volume"]
-    )
-    momentum_strong = all(bull_checks.values())
-    momentum_pass = core_pass
+    momentum_strong = bull_score >= 5
+    momentum_pass = bull_checks["ma_aligned"] and bull_score >= 3
     pass_path: str | None = None
     pass_path_note = ""
     if momentum_strong:
         pass_path = "✅+"
-        pass_path_note = "五子項全過（①②③④⑤）— 強勢動能"
-    elif core_pass:
+        pass_path_note = f"五子項全過（{bull_score}/5）— 強勢動能"
+    elif momentum_pass:
         pass_path = "✅"
-        pass_path_note = "核心過關（①③⑤）— 均線向上 + 浪型/突破 + 放量"
+        pass_path_note = (
+            f"① 必須 + 共 {bull_score}/5 子項 — 只買向上（① 均線向上已過）"
+        )
     breakout_launch = momentum_break_up and bull_checks["large_volume"] and ma_pointing_up
     bear_pass = bear_score >= 4 and bear_checks["ma_aligned"] and bear_checks["large_volume"]
     trend_dir = "升勢" if bull_score >= bear_score else "跌勢"
@@ -1134,7 +1190,7 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         "pass": momentum_pass,
         "pass_strong": momentum_strong,
         "bear_pass": bear_pass,
-        "note": ("✅+ " if momentum_strong else ("✅ " if momentum_pass else "")) + "；".join(notes),
+        "note": decorate_edge_note("；".join(notes), momentum_pass, momentum_strong),
         "bear_note": f"跌勢{bear_score}/5" + ("✓" if bear_pass else ""),
         "trend_dir": trend_dir,
         "bull_score": bull_score,
@@ -2601,9 +2657,20 @@ def analyze_csr(bars: list[dict], sr: dict, mom: dict) -> dict:
     elif bear_screw_fail:
         short_pattern = "Trap↑愚弄失敗反向"
 
+    csr_note = "；".join(long_notes) if long_notes else "未見 Long CSR 形態"
+    csr_checks = [
+        ("pattern", "① 形態", csr_pass, pattern if csr_pass else "未見 Long CSR"),
+        ("support", "② 關鍵支持", sup, "喺支持區" if sup else "唔喺關鍵支持"),
+        ("natural_pb", "③ Natural PB", bg["natural_pullback"], (bg.get("background_note") or "—")[:40]),
+        ("volume", "④ 放量", vol_ok, f"量{'OK' if vol_ok else '不足'}"),
+        ("background", "⑤ 背景配合", not (bull_pin and sup and bearish_bg), "背景配合" if not (bull_pin and sup and bearish_bg) else "背景唔配合"),
+    ]
+    csr_strong = csr_pass and all(c[2] for c in csr_checks)
     return {
         "pass": csr_pass,
-        "note": "；".join(long_notes) if long_notes else "未見 Long CSR 形態",
+        "pass_strong": csr_strong,
+        "check_rows": build_check_rows(csr_checks),
+        "note": decorate_edge_note(csr_note, csr_pass, csr_strong),
         "short_pass": bear_signal,
         "short_note": "；".join(short_notes) if short_notes else "未見 Short CSR 形態",
         "pattern": pattern,
@@ -2946,17 +3013,39 @@ def assess_first_touch(
             return "突破後近3K follow-through"
         return "未見 1st/2nd touch"
 
-    long_note = fmt_note(eff_long, qual_long, long_label, ma_l, "long")
+    qual_label = {
+        "ideal": "第1次（力量最強）",
+        "ok": "第2次（仍理想）",
+        "caution": "第3–4次（小心）",
+        "stale": "第5次+（失效）",
+        "none": "未見 touch",
+    }
+    ft_checks = [
+        ("touch", "① Touch 質量", qual_long in ("ideal", "ok"), qual_label.get(qual_long, qual_long)),
+        ("recent", "② 近期 touch", recent_long, "近1–2K" if recent_long else "—"),
+        ("rebound", "③ 反彈", rebound_long, "有反彈" if rebound_long else "—"),
+        ("trend", "④ 升勢 MA", ma_bull, "MA 向上" if ma_bull else "—"),
+        ("volume", "⑤ 量能", ft_vol, "跟進量 OK" if ft_vol else "—"),
+    ]
+    ft_strong = long_pass and all(c[2] for c in ft_checks)
+
+    long_note = decorate_edge_note(
+        fmt_note(eff_long, qual_long, long_label, ma_l, "long"),
+        long_pass,
+        ft_strong,
+    )
     if not long_pass and breakout_ft:
         long_note = "突破後近3K follow-through"
     elif long_pass and breakout_ft and qual_long == "none":
-        long_note = "突破後近3K follow-through"
+        long_note = decorate_edge_note("突破後近3K follow-through", True, ft_strong)
 
     short_note = fmt_note(eff_short, qual_short, short_label, ma_s, "short")
 
     return {
         "long_pass": long_pass,
         "short_pass": short_pass,
+        "pass_strong": ft_strong,
+        "check_rows": build_check_rows(ft_checks),
         "touch_number_long": eff_long,
         "touch_number_short": eff_short,
         "touch_ma_long": long_label,
@@ -3016,12 +3105,14 @@ def analyze_bars(bars: list[dict]) -> dict:
         "trend_dir": mom["trend_dir"],
         "sr_pass": sr_pass,
         "sr_note": sr_note,
+        "sr_detail": sr,
         "trading_area": sr["trading_area"],
         "wave_top": sr["wave_top"],
         "wave_bottom": sr["wave_bottom"],
         "retest_as_support": sr["retest_as_support"],
         "csr_pass": csr["pass"],
         "csr_note": csr["note"],
+        "csr_detail": csr,
         "csr_pattern": csr["pattern"],
         "csr_short_pass": csr["short_pass"],
         "csr_short_note": csr["short_note"],
@@ -3067,38 +3158,72 @@ def pct_return(closes: list[float], lookback: int | None = None) -> float | None
     return (closes[-1] / closes[-1 - lookback] - 1) * 100
 
 
-def assess_rs_leading_ma(bars: list[dict]) -> tuple[bool, bool, str, str]:
-    """Feature 2: leading / weak moving averages."""
-    if len(bars) < 25:
+def assess_rs_leading_ma_vs_spy(
+    stock_closes: list[float],
+    spy_closes: list[float],
+) -> tuple[bool, bool, str, str]:
+    """Feature 2: compare price vs 10/20/50 MA — stock position leads SPY."""
+    if len(stock_closes) < 50 or len(spy_closes) < 50:
         return False, False, "領先MA：數據不足", "弱勢MA：數據不足"
-    closes = [b["close"] for b in bars]
-    c = closes[-1]
-    s5 = sma(closes, 5)[-1]
-    s10 = sma(closes, 10)[-1]
-    s20 = sma(closes, 20)[-1]
-    s20_prev = sma(closes, 20)[-6]
-    long_pass = c > s5 > s10 > s20 and s20 > s20_prev
-    if not long_pass:
-        long_pass = c > s20 and s5 > s10 > s20 and c > s5
-    short_pass = c < s5 < s10 < s20 and s20 < s20_prev
-    if not short_pass:
-        short_pass = c < s20 and s5 < s10 < s20 and c < s5
-    long_note = (
-        f"領先MA：價>{s5:.2f}>{s10:.2f}>{s20:.2f}"
-        if long_pass
-        else f"領先MA未過：價{c:.2f} MA={s5:.2f}/{s10:.2f}/{s20:.2f}"
-    )
-    short_note = (
-        f"弱勢MA：價<{s5:.2f}<{s10:.2f}<{s20:.2f}"
-        if short_pass
-        else f"弱勢MA未過：價{c:.2f}"
-    )
+
+    def _ma_flags(closes: list[float]) -> dict[int, bool]:
+        c = closes[-1]
+        return {p: c > sma(closes, p)[-1] for p in (10, 20, 50)}
+
+    def _fmt(flags: dict[int, bool]) -> str:
+        return "/".join(f"{p}{'上' if flags[p] else '下'}" for p in (10, 20, 50))
+
+    stock_f = _ma_flags(stock_closes)
+    spy_f = _ma_flags(spy_closes)
+    sc = stock_closes[-1]
+    sp = spy_closes[-1]
+    stock_score = sum(stock_f.values())
+    spy_score = sum(spy_f.values())
+
+    long_pass = stock_score > spy_score
+    short_pass = stock_score < spy_score
+
+    if long_pass:
+        long_note = (
+            f"領先MA：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
+            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+        )
+    else:
+        long_note = (
+            f"領先MA未過：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
+            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+        )
+    if short_pass:
+        short_note = (
+            f"弱勢MA：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
+            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+        )
+    else:
+        short_note = f"弱勢MA未過：股 {stock_score}/3 vs SPY {spy_score}/3"
     return long_pass, short_pass, long_note, short_note
 
 
+def assess_rs_leading_ma(
+    bars: list[dict],
+    spy_closes: list[float] | None = None,
+) -> tuple[bool, bool, str, str]:
+    """Feature 2 wrapper — prefers stock vs SPY MA position when SPY data given."""
+    if len(bars) < 25:
+        return False, False, "領先MA：數據不足", "弱勢MA：數據不足"
+    closes = [b["close"] for b in bars]
+    if spy_closes:
+        return assess_rs_leading_ma_vs_spy(closes, spy_closes)
+    spy = yf_daily_closes("SPY", "6mo")
+    if spy:
+        return assess_rs_leading_ma_vs_spy(closes, spy)
+    return False, False, "領先MA：SPY 數據不足", "弱勢MA：SPY 數據不足"
+
+
 def assess_rs_leading_ma_from_closes(closes: list[float]) -> tuple[bool, bool, str, str]:
-    bars = [{"close": c, "open": c, "high": c, "low": c, "volume": 0} for c in closes]
-    return assess_rs_leading_ma(bars)
+    spy = yf_daily_closes("SPY", "6mo")
+    if spy:
+        return assess_rs_leading_ma_vs_spy(closes, spy)
+    return False, False, "領先MA：SPY 數據不足", "弱勢MA：SPY 數據不足"
 
 
 def assess_rs_line(
@@ -3167,7 +3292,7 @@ def assess_relative_strength(symbol: str, d1_bars: list[dict] | None = None) -> 
     """
     Edge #5 RS — three features (course):
     1) Counter-trend vs SPY (especially in bear market)
-    2) Leading moving averages (price above rising MAs)
+    2) Leading moving averages — stock vs SPY 10/20/50 MA position (relative score)
     3) RS line (stock/SPY ratio) pointing up
     Pass Long/Short when >= 2/3 features (don't need all three).
     """
@@ -3184,16 +3309,15 @@ def assess_relative_strength(symbol: str, d1_bars: list[dict] | None = None) -> 
         spy_bearish = spy_ret < 0 or spy_closes[-1] < spy_s20
 
         c_long, c_short, c_ln, c_sn = assess_rs_counter(stock_ret, spy_ret, spy_bearish)
-        if d1_bars and len(d1_bars) >= 25:
-            m_long, m_short, m_ln, m_sn = assess_rs_leading_ma(d1_bars)
-        else:
-            m_long, m_short, m_ln, m_sn = assess_rs_leading_ma_from_closes(stock_closes)
+        m_long, m_short, m_ln, m_sn = assess_rs_leading_ma_vs_spy(stock_closes, spy_closes)
         l_long, l_short, l_ln, l_sn = assess_rs_line(stock_closes, spy_closes)
 
         long_count = sum((c_long, m_long, l_long))
         short_count = sum((c_short, m_short, l_short))
         long_pass = int(long_count >= 2)
         short_pass = int(short_count >= 2)
+        long_strong = long_count >= 3
+        short_strong = short_count >= 3
 
         icon = lambda ok: "✓" if ok else "—"
         long_note = (
@@ -3207,8 +3331,10 @@ def assess_relative_strength(symbol: str, d1_bars: list[dict] | None = None) -> 
         return {
             "long_pass": long_pass,
             "short_pass": short_pass,
-            "long_note": long_note,
-            "short_note": short_note,
+            "long_pass_strong": long_strong,
+            "short_pass_strong": short_strong,
+            "long_note": decorate_edge_note(long_note, bool(long_pass), long_strong),
+            "short_note": decorate_edge_note(short_note, bool(short_pass), short_strong),
             "long_count": long_count,
             "short_count": short_count,
             "stock_ret_3m": round(stock_ret, 1),
@@ -3746,6 +3872,8 @@ def _compose_broad_market_edge(
     short_count = sr_s + mom_s + mtf_s
     long_pass = int(long_count >= 2 and long_count >= short_count)
     short_pass = int(short_count >= 2 and short_count > long_count)
+    long_strong = long_pass and long_count >= 3
+    short_strong = short_pass and short_count >= 3
 
     if long_pass:
         bias, directive = "long", "大盤 Long Edge → 積極搵長倉"
@@ -3767,8 +3895,10 @@ def _compose_broad_market_edge(
     out = {
         "long_pass": long_pass,
         "short_pass": short_pass,
-        "long_note": long_note,
-        "short_note": short_note,
+        "long_pass_strong": long_strong,
+        "short_pass_strong": short_strong,
+        "long_note": decorate_edge_note(long_note, bool(long_pass), long_strong),
+        "short_note": decorate_edge_note(short_note, bool(short_pass), short_strong),
         "bias": bias,
         "directive": directive,
         "long_count": long_count,
@@ -3785,6 +3915,11 @@ def _compose_broad_market_edge(
             "momentum": {"long": mom_l, "short": mom_s, "long_note": mom_ln, "short_note": mom_sn},
             "mtf": {"long": mtf_l, "short": mtf_s, "long_note": mtf_ln, "short_note": mtf_sn},
         },
+        "check_rows_long": build_check_rows([
+            ("sr_zone", "① S&R Long/Short Edge zone", bool(sr_l), sr_ln),
+            ("momentum", "② 動能/趨勢", bool(mom_l), mom_ln),
+            ("mtf", "③ MTF W1→D1", bool(mtf_l), mtf_ln),
+        ]),
     }
     if as_of:
         out["as_of"] = as_of.isoformat()
@@ -5878,6 +6013,14 @@ def build_rr_plan(
     preferred = "retest" if d1.get("retest_as_support") else ("breakout" if not d1["sr_pass"] else "retest")
     stop_kl = resolve_stop_keylevel(d1, stop, setup_kind, bars) or stop_reason.split(" $")[0]
     tp2_kl = resolve_tp2_keylevel(d1, best["type"], best["label"])
+    meta_checks = [
+        ("entry", "① Entry", True, f"${round(c, 2)}"),
+        ("stop", "② Stop", risk > 0, stop_reason),
+        ("target", "③ Target", best["target"] > c, best["label"]),
+        ("rr2", "④ RR≥2", raw_rr >= 2, f"{raw_rr:.1f}:1"),
+    ]
+    meta_aligned = raw_rr >= 2 and risk > 0 and best["target"] > c
+    meta_strong = meta_aligned and all(c[2] for c in meta_checks) and raw_rr >= 5
 
     return {
         "preferred": preferred,
@@ -5894,8 +6037,10 @@ def build_rr_plan(
         "reward_target_label": best["label"],
         "raw_rr": round(raw_rr, 2),
         "rr": round(raw_rr, 2),
-        "discounted_note": _rr_discounted_note(raw_rr),
-        "meta_aligned": raw_rr >= 2,
+        "discounted_note": decorate_edge_note(_rr_discounted_note(raw_rr), meta_aligned, meta_strong),
+        "meta_aligned": meta_aligned,
+        "pass_strong": meta_strong,
+        "check_rows": build_check_rows(meta_checks),
         "direction": "long",
     }
 
@@ -5922,9 +6067,7 @@ EDGE_DISPLAY_NAMES = [
     "Major Indicators",
 ]
 
-EDGE_OVERVIEW_KEYS = [
-    "momentum_trend", "sr", "csp_pa_vol", "mtf", "ft", "mi",
-]
+EDGE_OVERVIEW_KEYS = list(EDGES)
 
 EDGE_LABELS_ZH = {
     "momentum_trend": "Momentum & Trend",
@@ -5932,10 +6075,10 @@ EDGE_LABELS_ZH = {
     "csp_pa_vol": "Candle / PA / Volume",
     "mtf": "Multi-Timeframe",
     "rs": "Relative Strength",
-    "rrs": "Reward / Risk / Structure",
+    "rrs": "Reward / Risk / Structure（暫不計分）" if not RRS_EDGE_SCORING_ENABLED else "Reward / Risk / Structure",
     "board_edge": "Broad Market"
     + ("（參考·不計分）" if not _BME_SCORING_ENABLED else ""),
-    "ft": "First Touch",
+    "ft": "First Touch（暫不計分）" if not FT_EDGE_SCORING_ENABLED else "First Touch",
     "mi": "Major Indicators（參考·不計分）" if not MI_EDGE_SCORING_ENABLED else "Major Indicators",
 }
 
@@ -6152,13 +6295,14 @@ def build_edge_scenarios(
 def grade_from_edges(edges: dict) -> tuple[int, str, str]:
     total = sum_edge_scores(edges)
     core = [edges[k]["score"] for k in ("momentum_trend", "sr", "csp_pa_vol", "mtf", "rs")]
-    if total >= 7 and all(core):
+    core_all = all(core)
+    a_min = max(5, EDGE_SCORE_MAX - 1)
+    b_min = max(4, EDGE_SCORE_MAX - 2)
+    if core_all and total >= a_min:
         return total, "A", "trade"
-    if total == 6:
+    if total >= b_min:
         return total, "B", "watch"
-    if total <= 5:
-        return total, "C", "skip"
-    return total, "B", "watch"
+    return total, "C", "skip"
 
 
 def tf_direction(analysis: dict) -> str:
@@ -6174,13 +6318,13 @@ def tf_direction(analysis: dict) -> str:
     return "neutral"
 
 
-def analyze_mtf_cross(
+def analyze_mtf_detail(
     w1: dict | None,
     d1: dict,
     h1: dict | None,
     *,
     use_h1: bool | None = None,
-) -> tuple[int, int, str]:
+) -> dict:
     """
     Edge #4 MTF across W1 (HTF) -> D1 (mid) -> H1 (LTF).
     H1_SCORING_ENABLED=False 時只計 W1->D1。
@@ -6252,7 +6396,27 @@ def analyze_mtf_cross(
         ) else 0
         align = "Long 對齊" if mtf_long else ("Short 對齊" if mtf_short else "未對齊")
         note = f"W1->D1 {align}（H1 暫不計）：W1={w_dir} | D1={d_dir}"
-        return mtf_long, mtf_short, note
+        long_checks = [
+            ("w1", "① W1 支持", w1 is not None and w_dir in ("long", "neutral"), f"W1={w_dir}"),
+            ("d1_setup", "② D1 setup", d1_long_setup, f"D1 close ${d1['close']:.2f}"),
+            ("d1_dir", "③ D1 方向", d_dir in ("long", "neutral"), f"D1={d_dir}"),
+        ]
+        short_checks = [
+            ("w1", "① W1 支持", w1 is not None and w_dir in ("short", "neutral"), f"W1={w_dir}"),
+            ("d1_setup", "② D1 setup", d1_short_setup, f"D1 close ${d1['close']:.2f}"),
+            ("d1_dir", "③ D1 方向", d_dir in ("short", "neutral"), f"D1={d_dir}"),
+        ]
+        long_strong = bool(mtf_long) and all(c[2] for c in long_checks)
+        short_strong = bool(mtf_short) and all(c[2] for c in short_checks)
+        return {
+            "long": mtf_long,
+            "short": mtf_short,
+            "note": decorate_edge_note(note, bool(mtf_long), long_strong),
+            "long_strong": long_strong,
+            "short_strong": short_strong,
+            "check_rows_long": build_check_rows(long_checks),
+            "check_rows_short": build_check_rows(short_checks),
+        }
 
     mtf_long = 1 if (
         w1 is not None and h1 is not None
@@ -6270,7 +6434,38 @@ def analyze_mtf_cross(
         note = f"部分 stack（缺 {'/'.join(missing)}）：{stack_note}；{align}"
     else:
         note = f"W1->D1->H1 {align}：{stack_note}"
-    return mtf_long, mtf_short, note
+    long_checks = [
+        ("w1", "① W1", w1 is not None and w_dir in ("long", "neutral"), f"W1={w_dir}"),
+        ("d1", "② D1 setup", d1_long_setup, f"D1={d_dir}"),
+        ("h1", "③ H1 時機", ltf_long_ok(), f"H1={h_dir}"),
+    ]
+    short_checks = [
+        ("w1", "① W1", w1 is not None and w_dir in ("short", "neutral"), f"W1={w_dir}"),
+        ("d1", "② D1 setup", d1_short_setup, f"D1={d_dir}"),
+        ("h1", "③ H1 時機", ltf_short_ok(), f"H1={h_dir}"),
+    ]
+    long_strong = bool(mtf_long) and all(c[2] for c in long_checks)
+    short_strong = bool(mtf_short) and all(c[2] for c in short_checks)
+    return {
+        "long": mtf_long,
+        "short": mtf_short,
+        "note": decorate_edge_note(note, bool(mtf_long), long_strong),
+        "long_strong": long_strong,
+        "short_strong": short_strong,
+        "check_rows_long": build_check_rows(long_checks),
+        "check_rows_short": build_check_rows(short_checks),
+    }
+
+
+def analyze_mtf_cross(
+    w1: dict | None,
+    d1: dict,
+    h1: dict | None,
+    *,
+    use_h1: bool | None = None,
+) -> tuple[int, int, str]:
+    d = analyze_mtf_detail(w1, d1, h1, use_h1=use_h1)
+    return d["long"], d["short"], d["note"]
 
 
 def apply_mi_override(analysis: dict, mi_detail: dict, source: str = "W1") -> dict:
@@ -6431,7 +6626,8 @@ def score_from_bars(
     if h1:
         h1 = apply_mi_override(h1, mi_canonical, mi_source_tf)
 
-    mtf_pass, mtf_short, mtf_note = analyze_mtf_cross(w1, d1, h1)
+    mtf = analyze_mtf_detail(w1, d1, h1)
+    mtf_pass, mtf_short, mtf_note = mtf["long"], mtf["short"], mtf["note"]
 
     rs = assess_relative_strength(sym, bars)
     market = market_edge if market_edge is not None else get_broad_market_edge()
@@ -6537,13 +6733,11 @@ def score_from_bars(
         "volume_avg": str(d1["avg_volume_20"]),
         "metrics": d1_block["metrics"],
         "timeframes": tf_blocks,
-        "mtf_detail": {
-            "long": mtf_pass,
-            "short": mtf_short,
-            "note": mtf_note,
-        },
+        "mtf_detail": mtf,
         "rs_detail": rs,
         "momentum_detail": d1.get("momentum_detail"),
+        "sr_detail": d1.get("sr_detail"),
+        "csr_detail": d1.get("csr_detail"),
         "market_edge_detail": market,
         "sector_footnote": sector_footnote,
         "sector_peer_direction": sector_peer,
@@ -6833,10 +7027,11 @@ def build_summary_text(data: dict) -> str:
         parts.append("核心 edge 達標，可配合 Entry Plan 執行。")
 
     ft = data.get("ft_detail") or {}
-    if ft.get("quality_long") == "caution":
-        parts.append(f"First Touch 第{ft.get('touch_number_long')}次——偏短線/小心。")
-    elif ft.get("quality_long") == "ideal" and ft.get("long_pass"):
-        parts.append("First Touch 第1次——META 理想入場區。")
+    if FT_EDGE_SCORING_ENABLED:
+        if ft.get("quality_long") == "caution":
+            parts.append(f"First Touch 第{ft.get('touch_number_long')}次——偏短線/小心。")
+        elif ft.get("quality_long") == "ideal" and ft.get("long_pass"):
+            parts.append("First Touch 第1次——META 理想入場區。")
 
     sc = data.get("scenarios") or {}
     if sc:
@@ -6897,15 +7092,15 @@ def _edge_icon(v: int | bool) -> str:
     return "✅" if v else "❌"
 
 
-_EDGE_OVERVIEW_WRAP_STYLE = "width:720px;max-width:100%;font-size:0.88em;margin-bottom:16px;"
-_EDGE_OVERVIEW_TABLE_STYLE = "border-collapse:collapse;width:100%;table-layout:fixed;"
+_EDGE_OVERVIEW_WRAP_STYLE = "max-width:100%;overflow-x:auto;font-size:0.82em;margin-bottom:16px;"
+_EDGE_OVERVIEW_TABLE_STYLE = "border-collapse:collapse;min-width:1040px;width:100%;table-layout:fixed;"
 _EDGE_OVERVIEW_COLGROUP = (
     "<colgroup>"
+    "<col style='width:4%'>"
     "<col style='width:5%'>"
-    "<col style='width:6%'>"
-    "<col style='width:6%'>"
-    "<col style='width:9%'>"
-    + "".join("<col style='width:12%'>" for _ in EDGE_OVERVIEW_KEYS)
+    "<col style='width:5%'>"
+    "<col style='width:7%'>"
+    + "".join("<col style='width:8.6%'>" for _ in EDGE_OVERVIEW_KEYS)
     + "</colgroup>"
 )
 
@@ -6996,8 +7191,10 @@ def format_combined_edge_dashboard(
     return [
         "## 多週期 Edge 總覽（W1 / D1 分開計）",
         "",
-        "> 整體 Grade 以 **D1** 為主；Multi-Timeframe 為 W1→D1 對齊（**H1 暫不計**）；"
-        "Relative Strength / Broad Market 為 symbol / SPY 級。",
+        "> 整體 Grade 以 **D1** 為主；表內 **9 欄 ✅/❌** 對應全部 Edge。"
+        f" **Long/Short 分數** 只計 **{EDGE_SCORE_MAX}** 個計分 Edge"
+        + ("（MI、F.T.、R&R&S 暫不計分）" if not MI_EDGE_SCORING_ENABLED or not FT_EDGE_SCORING_ENABLED or not RRS_EDGE_SCORING_ENABLED else "")
+        + "；Multi-Timeframe = W1→D1（H1 暫不計）；RS / BME = symbol / SPY 級。",
         "",
         html,
         "",
@@ -7050,11 +7247,29 @@ def format_tf_detail_section(tf: str, block: dict) -> list[str]:
             note = block["long_notes"]["mtf"]
         if key == "mi" and not MI_EDGE_SCORING_ENABLED:
             note = f"{note}（不計分·請喺 TV 睇 MACD）"
+        if key == "ft" and not FT_EDGE_SCORING_ENABLED:
+            note = f"{note}（暫不計分）"
+        if key == "rrs" and not RRS_EDGE_SCORING_ENABLED:
+            note = f"{note}（暫不計分）"
         if key == "board_edge" and not _BME_SCORING_ENABLED:
             note = f"{note}（參考·不計分）"
         lines.append(
             f"| {i + 1} | {labels[i]} | {'✅' if le else '❌'} | {'✅' if se else '❌'} | {note} |"
         )
+    lines.append("")
+    return lines
+
+
+def format_sub_items_table(rows: list[dict] | None) -> list[str]:
+    if not rows:
+        return []
+    icon = lambda ok: "✅" if ok else "❌"
+    lines = [
+        "| 子項 | Long | 說明 |",
+        "|------|:----:|------|",
+    ]
+    for row in rows:
+        lines.append(f"| {row['label']} | {icon(row.get('pass'))} | {row.get('note', '—')} |")
     lines.append("")
     return lines
 
@@ -7081,8 +7296,8 @@ def format_momentum_section(mom: dict) -> list[str]:
     lines = [
         "## Edge #1 — Momentum & Trend（五子項 · D1）",
         "",
-        "> **通過規則**：**①③⑤** 過 = ✅；**②④** 都過埋 = **✅+** 強勢。",
-        "> ① 只睇 10/20/50 MA **斜向上**，唔要完整排列。",
+        "> **通過規則**：**① 均線向上必須中** + 五子項共 **≥3** = ✅；**5/5** = **✅+**（全 Edge 同一邏輯）。",
+        "> ① 只睇 10/20/50 MA **斜向上**（只買向上）。",
         "",
         f"- **Long Momentum & Trend**：{status}（{mom.get('bull_score', 0)}/5）",
         f"- **趨勢方向**：{mom.get('trend_dir', '—')}",
@@ -7093,17 +7308,77 @@ def format_momentum_section(mom: dict) -> list[str]:
     if mom.get("pass_path"):
         lines.append(f"- **評級**：**{mom['pass_path']}** — {mom.get('pass_path_note', '')}")
     elif not long_ok:
-        lines.append("- **評級**：—（要 ① 均線向上 + ③ 浪型/突破 + ⑤ 放量）")
-    lines += [
+        lines.append("- **評級**：—（要 ① 均線向上 + 五子項共 ≥3）")
+    lines += ["", *format_sub_items_table(rows)]
+    return lines
+
+
+def format_sr_section(sr: dict) -> list[str]:
+    if not sr:
+        return []
+    passed = bool(sr.get("pass"))
+    strong = bool(sr.get("pass_strong"))
+    area = sr.get("trading_area") or {}
+    lines = [
+        "## Edge #2 — Support & Resistance（五子項 · D1）",
         "",
-        "| 子項 | Long | 說明 |",
-        "|------|:----:|------|",
+        "> 子項全過 = **✅+**",
+        "",
+        f"- **Long S&R**：{edge_status_label(passed, strong)}",
+        f"- **備註**：{sr.get('note', '—')}",
     ]
-    for row in rows:
+    if area:
+        src = "、".join(area.get("sources") or []) or "—"
         lines.append(
-            f"| {row['label']} | {icon(row.get('pass'))} | {row.get('note', '—')} |"
+            f"- **Trading area**：{area.get('type', '—')} "
+            f"${area.get('zone_lo', '—')}–${area.get('zone_hi', '—')}（{area.get('edge_count', 0)}源: {src}）"
         )
-    lines.append("")
+    lines += [
+        f"- **前浪頂 / 底**：${sr.get('wave_top', '—')} / ${sr.get('wave_bottom', '—')}",
+        f"- **20日低 / 60日阻力**：~${sr.get('swing_low', '—')} / ~${sr.get('resistance', '—')}",
+        "",
+        *format_sub_items_table(sr.get("check_rows")),
+    ]
+    return lines
+
+
+def format_csr_section(csr: dict) -> list[str]:
+    if not csr:
+        return []
+    passed = bool(csr.get("pass"))
+    strong = bool(csr.get("pass_strong"))
+    lines = [
+        "## Edge #3 — Candle / PA / Volume（五子項 · D1）",
+        "",
+        "> 子項全過 = **✅+**",
+        "",
+        f"- **Long CSP/PA/VOL**：{edge_status_label(passed, strong)}",
+        f"- **形態**：{csr.get('pattern', '—')}",
+        f"- **備註**：{csr.get('note', '—')}",
+        f"- **Short CSR**：{'✅ 通過' if csr.get('short_pass') else '❌ 未過'} — {csr.get('short_pattern', '—')}",
+        "",
+        *format_sub_items_table(csr.get("check_rows")),
+    ]
+    return lines
+
+
+def format_mi_section(mi: dict) -> list[str]:
+    if not mi:
+        return []
+    passed = bool(mi.get("long_pass"))
+    strong = bool(mi.get("pass_strong"))
+    lines = [
+        "## Edge #9 — Major Indicators（M.I. · MACD Breakout · D1）",
+        "",
+        "> 子項全過 = **✅+**",
+        "",
+        f"- **Long M.I.**：{edge_status_label(passed, strong)}",
+        f"- **MACD**：line {mi.get('macd_line', '—')} / signal {mi.get('macd_signal', '—')} / hist {mi.get('macd_hist', '—')}",
+        f"- **備註**：{mi.get('long_note', '—')}",
+        f"- **Short M.I.**：{'✅ 通過' if mi.get('short_pass') else '❌ 未過'} — {mi.get('short_note', '—')}",
+        "",
+        *format_sub_items_table(mi.get("check_rows")),
+    ]
     return lines
 
 
@@ -7111,6 +7386,7 @@ def format_mtf_section(mtf_detail: dict) -> list[str]:
     note = mtf_detail.get("note", "")
     long_ok = mtf_detail.get("long")
     short_ok = mtf_detail.get("short")
+    long_strong = mtf_detail.get("long_strong")
     title = (
         "## Edge #4 — Multi-Timeframe（W1 → D1 → H1）"
         if H1_SCORING_ENABLED
@@ -7124,11 +7400,14 @@ def format_mtf_section(mtf_detail: dict) -> list[str]:
     return [
         title,
         "",
-        f"- **Long Multi-Timeframe**：{'✅ 通過' if long_ok else '❌ 未過'}",
+        "> 子項全過 = **✅+**",
+        "",
+        f"- **Long Multi-Timeframe**：{edge_status_label(bool(long_ok), bool(long_strong))}",
         f"- **Short Multi-Timeframe**：{'✅ 通過' if short_ok else '❌ 未過'}",
         f"- **邏輯**：{logic}",
         f"- **備註**：{note}",
         "",
+        *format_sub_items_table(mtf_detail.get("check_rows_long")),
     ]
 
 
@@ -7145,12 +7424,13 @@ def format_rs_section(rs_detail: dict) -> list[str]:
     icon = lambda ok: "✅" if ok else "❌"
     long_ok = rs_detail.get("long_pass")
     short_ok = rs_detail.get("short_pass")
+    long_strong = rs_detail.get("long_pass_strong")
     lines = [
         "## Edge #5 — Relative Strength（相對強度 — 三特徵）",
         "",
-        "> 唔使三樣齊晒：見到 **2/3** 特徵 + 前文後理判斷有 RS 即可；強勢領導股往往有 RS，但有 RS ≠ 一定係領導股。",
+        "> 唔使三樣齊晒：見到 **2/3** 特徵即可；**3/3** = **✅+**。",
         "",
-        f"- **Long Relative Strength**：{'✅ 通過' if long_ok else '❌ 未過'}（{rs_detail.get('long_count', 0)}/3）",
+        f"- **Long Relative Strength**：{edge_status_label(bool(long_ok), bool(long_strong))}（{rs_detail.get('long_count', 0)}/3）",
         f"- **Short 弱 Relative Strength**：{'✅ 通過' if short_ok else '❌ 未過'}（{rs_detail.get('short_count', 0)}/3）",
         f"- **3M 回報**：股票 {rs_detail.get('stock_ret_3m', '—')}% vs SPY {rs_detail.get('spy_ret_3m', '—')}%"
         + ("（跌市）" if rs_detail.get("spy_bearish") else ""),
@@ -7160,7 +7440,7 @@ def format_rs_section(rs_detail: dict) -> list[str]:
     ]
     labels = {
         "counter_trend": "① 反向走勢（跌市最易見）",
-        "leading_ma": "② 領先移動平均線",
+        "leading_ma": "② 領先移動平均線（10/20/50 位置 vs SPY）",
         "rs_line": "③ RS線向上",
     }
     for key, label in labels.items():
@@ -7168,6 +7448,16 @@ def format_rs_section(rs_detail: dict) -> list[str]:
         lines.append(
             f"| {label} | {icon(f.get('long'))} | {icon(f.get('short'))} | {f.get('long_note', '—')} |"
         )
+    long_rows = [
+        {"label": label, "pass": feats.get(key, {}).get("long"), "note": feats.get(key, {}).get("long_note", "—")}
+        for key, label in labels.items()
+    ]
+    lines += [
+        "",
+        "**Long 子項（統一格式）**",
+        "",
+        *format_sub_items_table(long_rows),
+    ]
     lines.append("")
     return lines
 
@@ -7190,6 +7480,7 @@ def format_broad_market_section(market: dict) -> list[str]:
     icon = lambda ok: "✅" if ok else "❌"
     long_ok = market.get("long_pass")
     short_ok = market.get("short_pass")
+    long_strong = market.get("long_pass_strong")
     bias_zh = {"long": "Long Edge（做多環境）", "short": "Short Edge（做空環境）", "neutral": "無明確 Edge"}
     quote = market.get("quote") or {}
     price_line = f"${market.get('close', '—')}"
@@ -7199,14 +7490,13 @@ def format_broad_market_section(market: dict) -> list[str]:
     lines = [
         "## Edge #7 — Broad Market Edge（大盤 Long/Short Edge）",
         "",
-        "> **Trade What We See**：判斷大盤係 Long Edge 定 Short Edge；大盤 Long → 積極搵長倉（強勢股）；Short → 積極搵短倉。",
-        "> 唔使三柱齊：**2/3** 通過即可（① S&R 匯聚區 ② 動能/趨勢 ③ MTF W1→D1）。",
-        "> SPY 用 **即時/盤前/盤後** 報價；無當前時段報價則 **參考·不計分**（唔用昨日收市）。",
+        "> **Trade What We See**：判斷大盤係 Long Edge 定 Short Edge。",
+        "> **2/3** 通過；**3/3** = **✅+**。",
         "",
         f"- **SPY 現價**：{price_line}",
         f"- **大盤偏向**：{bias_zh.get(market.get('bias', 'neutral'), market.get('bias'))}",
         f"- **交易指引**：**{market.get('directive', '—')}**",
-        f"- **Long Edge**：{'✅ 通過' if long_ok else '❌ 未過'}（{market.get('long_count', 0)}/3）",
+        f"- **Long Edge**：{edge_status_label(bool(long_ok), bool(long_strong))}（{market.get('long_count', 0)}/3）",
         f"- **Short Edge**：{'✅ 通過' if short_ok else '❌ 未過'}（{market.get('short_count', 0)}/3）",
         "",
         "| 支柱 | Long | Short | 說明 |",
@@ -7222,6 +7512,12 @@ def format_broad_market_section(market: dict) -> list[str]:
         lines.append(
             f"| {label} | {icon(f.get('long'))} | {icon(f.get('short'))} | {f.get('long_note', '—')} |"
         )
+    lines += [
+        "",
+        "**Long 子項（統一格式）**",
+        "",
+        *format_sub_items_table(market.get("check_rows_long")),
+    ]
     peer = market.get("sector_peers")
     if peer and peer.get("note"):
         lines.append("")
@@ -7292,13 +7588,15 @@ def format_rr_section(plan: dict) -> list[str]:
     """Edge #6 R&R&S — M.E.T.A. (entry + stop + reward must align)."""
     if not plan.get("entry"):
         return []
-    icon = "✅" if plan.get("meta_aligned") else "❌"
+    aligned = plan.get("meta_aligned")
+    strong = plan.get("pass_strong")
+    icon = "✅+" if strong else ("✅" if aligned else "❌")
     tgt_type = plan.get("reward_target_type", "—")
     type_zh = {"wave_top": "前浪頂", "UTL": "UTL", "DTL": "DTL", "fixed_2r": "2R fallback"}.get(tgt_type, tgt_type)
     lines = [
         "## Edge #6 — R&R&S（M.E.T.A.）",
         "",
-        "> **M**oney **E**ntry **T**arget **A**lignment：入場、止損、目標、RR 四者必須一齊合理先入場。",
+        "> **M**oney **E**ntry **T**arget **A**lignment；子項全過 + RR≥5 = **✅+**。",
         "",
         f"| 項目 | 數值 |",
         f"|------|------|",
@@ -7311,6 +7609,7 @@ def format_rr_section(plan: dict) -> list[str]:
         f"| Raw RR | **{plan.get('raw_rr', plan['rr'])}:1** {icon} |",
         f"| 評語 | {plan.get('discounted_note', '—')} |",
         "",
+        *format_sub_items_table(plan.get("check_rows")),
         "目標優先序：前浪頂 / 60日阻力 / 結構位（UTL/DTL 通道僅圖表參考，唔做 Setup TP）；"
         "止損優先序：Trading area low → 前浪底 → 20日低。",
         "",
@@ -7329,12 +7628,14 @@ def format_ft_section(ft: dict) -> list[str]:
         "stale": "第5次+（易穿越失效）",
         "none": "未見 touch",
     }
-    long_icon = "✅" if ft.get("long_pass") else "❌"
+    long_icon = "✅+" if ft.get("pass_strong") else ("✅" if ft.get("long_pass") else "❌")
     short_icon = "✅" if ft.get("short_pass") else "❌"
     lines = [
         "## Edge #8 — F.T.（First Touch / META 進場）",
         "",
-        "> META 進場：**盡量第1或第2次** MA touch + 即時反彈；第3/4次要小心；多次穿越後力量減弱。",
+        "> META 進場：**盡量第1或第2次** MA touch + 即時反彈；子項全過 = **✅+**。",
+        "",
+        f"- **Long F.T.**：{edge_status_label(bool(ft.get('long_pass')), bool(ft.get('pass_strong')))}",
         "",
         "| 方向 | 通過 | Touch 次數 | MA | 質量 | 說明 |",
         "|------|:----:|:----------:|:--:|------|------|",
@@ -7343,6 +7644,7 @@ def format_ft_section(ft: dict) -> list[str]:
         f"| Short | {short_icon} | {ft.get('touch_number_short', 0)} | {ft.get('touch_ma_short', '—')} "
         f"| {qual_zh.get(ft.get('quality_short'), '—')} | {ft.get('short_note', '—')} |",
         "",
+        *format_sub_items_table(ft.get("check_rows")),
     ]
     if ft.get("breakout_ft"):
         lines.append("- 另：突破後近3K follow-through 亦計 Long F.T.")
@@ -7524,18 +7826,27 @@ def format_md(data: dict) -> str:
         if d1_analysis := data.get("d1_analysis"):
             lines.extend(format_sr_key_levels_section(d1_analysis, bars=data.get("d1_bars")))
         lines.extend(format_price_scenarios(data))
+        _d1 = data.get("d1_analysis") or {}
+        if mom := data.get("momentum_detail") or _d1.get("momentum_detail"):
+            lines.extend(format_momentum_section(mom))
+        if sr := data.get("sr_detail") or _d1.get("sr_detail"):
+            lines.extend(format_sr_section(sr))
+        if csr := data.get("csr_detail") or _d1.get("csr_detail"):
+            lines.extend(format_csr_section(csr))
         if mtf := data.get("mtf_detail"):
             lines.extend(format_mtf_section(mtf))
-        if mom := data.get("momentum_detail"):
-            lines.extend(format_momentum_section(mom))
         if rs := data.get("rs_detail"):
             lines.extend(format_rs_section(rs))
+        if p := data.get("entry_plan"):
+            if RRS_EDGE_SCORING_ENABLED:
+                lines.extend(format_rr_section(p))
         if market := data.get("market_edge_detail"):
             lines.extend(format_broad_market_section(market))
-        if p := data.get("entry_plan"):
-            lines.extend(format_rr_section(p))
         if ft := data.get("ft_detail"):
-            lines.extend(format_ft_section(ft))
+            if FT_EDGE_SCORING_ENABLED:
+                lines.extend(format_ft_section(ft))
+        if mi := data.get("mi_detail"):
+            lines.extend(format_mi_section(mi))
         for tf in active_tf_order():
             if tf in tfs:
                 lines.extend(format_tf_detail_section(tf, tfs[tf]))
@@ -7605,6 +7916,10 @@ def format_md(data: dict) -> str:
         note = e["note"]
         if key == "mi" and not MI_EDGE_SCORING_ENABLED:
             note = f"{note}（不計分·請喺 TV 睇 MACD）"
+        if key == "ft" and not FT_EDGE_SCORING_ENABLED:
+            note = f"{note}（暫不計分）"
+        if key == "rrs" and not RRS_EDGE_SCORING_ENABLED:
+            note = f"{note}（暫不計分）"
         if key == "board_edge" and (not _BME_SCORING_ENABLED or not (data.get("market_edge_detail") or {}).get("scoring_enabled", True)):
             note = f"{note}（參考·不計分）"
         if key == "csp_pa_vol" and e.get("short_score"):
@@ -7614,6 +7929,10 @@ def format_md(data: dict) -> str:
     mi_note = ""
     if not MI_EDGE_SCORING_ENABLED:
         mi_note = " · *MI/MACD 不計分，請喺 TV 自行確認*"
+    if not FT_EDGE_SCORING_ENABLED:
+        mi_note += " · *F.T. 暫不計分*"
+    if not RRS_EDGE_SCORING_ENABLED:
+        mi_note += " · *R&R&S 暫不計分*"
     bme_skipped = not (data.get("market_edge_detail") or {}).get("scoring_enabled", True)
     if bme_skipped:
         mi_note += " · *BME 無即時報價不計分*"

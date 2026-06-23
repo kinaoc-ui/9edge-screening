@@ -1,0 +1,3 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+LTH,NYSE:LTH,Consumer services,Other consumer services,"Life Time Group Holdings, Inc.",A+,W1+D1,True,3,3,6,37.33,W1 3/3：MA轉上；量價配合 | D1 3/3：MA轉上；量價配合
+ABNB,NASDAQ:ABNB,Consumer services,Hotels/Resorts/Cruise lines,"Airbnb, Inc.",A,D1,True,0,3,3,139.19,W1 0/3：未達 | D1 3/3：MA轉上；量價配合

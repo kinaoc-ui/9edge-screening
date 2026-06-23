@@ -1,0 +1,7 @@
+# 3 symbols · 1 sections (### = Sector/Industry group headers, not tickers)
+
+### Producer manufacturing — Industrial machinery
+
+NYSE:CARR
+NASDAQ:ENTG
+NASDAQ:MIDD

@@ -1,0 +1,7 @@
+# 3 symbols · 1 sections (### = Sector/Industry group headers, not tickers)
+
+### Health technology — Medical specialties
+
+NASDAQ:VCYT
+NASDAQ:GH
+NASDAQ:LIVN

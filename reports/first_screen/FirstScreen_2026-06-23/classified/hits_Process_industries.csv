@@ -1,0 +1,2 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+ESI,NYSE:ESI,Process industries,Chemicals: major diversified,Element Solutions Inc.,A,D1,True,1,2,3,47.6,W1 1/3：股跌日量低；大陽2根 | D1 2/3：MA轉上；股跌日量低；大陽3根 | 跌市反向：3M 43.9% vs SPY 12.9% | 領先MA：股 $47.57 [10上/20上/50上] 3/3 vs SPY $737.95 [10下/20下/50上] 1/3

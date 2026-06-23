@@ -1,0 +1,3 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+SN,NYSE:SN,Consumer durables,Electronics/Appliances,"SharkNinja, Inc.",A,W1,True,2,2,4,135.46,W1 2/3：MA轉上；股跌日量低；大陽2根 | D1 2/3：量價配合；大陽2根 | 跌市反向：3M 28.8% vs SPY 12.9% | 領先MA：股 $135.46 [10上/20上/50上] 3/3 vs SPY $737.87 [10下/20下/50上] 1/3
+SWK,NYSE:SWK,Consumer durables,Tools & hardware,"Stanley Black & Decker, Inc.",A,W1,True,2,1,3,84.38,W1 2/3：MA轉上；股跌日量低；大陽1根 | D1 1/3：股跌日量低；大陽2根 | 跌市反向：3M 22.0% vs SPY 12.9% | 領先MA：股 $84.38 [10上/20上/50上] 3/3 vs SPY $737.74 [10下/20下/50上] 1/3

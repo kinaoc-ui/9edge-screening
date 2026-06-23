@@ -55,8 +55,8 @@ Only **A setups** are tradable.
 
 ### Edge #1 — Momentum & Trend（J LAW 強勁動能 + 趨勢）✅ 已實作
 
-Long bias — **①③⑤ 過 = ✅**；五子項全過 = **✅+**。  
-**① 均線向上**：10 / 20 / 50 MA 斜向上即可（唔要完整排列、唔用 5MA）。  
+Long bias — **① 必須中** + 五子項 **≥3/5 = ✅**；**5/5 = ✅+**（只買向上）。  
+**① 均線向上**：10 / 20 / 50 MA 斜向上即可（唔用 5MA）。  
 **同時計跌勢 5 子項**（Short edge 對比用）。**唔計波幅。**
 
 | 子項 | 升勢 pass 條件 |
@@ -351,7 +351,7 @@ Each timeframe gets its own 9-edge table in the report; MTF (#4) is the cross-st
 **三特徵**（唔使齊晒，**≥2/3** 即過；前文後理判斷有 RS 可果斷進場）：
 
 1. **反向走勢** — 跑贏 SPY；跌市時最易見（大盤跌、個股平/升）。
-2. **領先移動平均線** — 價在 5/10/20MA 之上，短均線領先（D1）。
+2. **領先移動平均線** — 對比個股同 SPY 喺 **10/20/50 MA** 上下位置；個股 MA 位領先大盤（例如股 3/3 上、SPY 只得 1/3 上）。
 3. **RS 線向上** — 股價/SPY 比率上升或近 40 日新高。
 
 > 強勢領導股往往有 RS；但有 RS 的股票不一定是強勢領導股。
@@ -360,7 +360,9 @@ Implemented: `assess_relative_strength()` — yfinance SPY + D1 CSV bars。
 
 ---
 
-### Edge #6 — R&R&S（Risk, Reward & Stop）✅ V2
+### Edge #6 — R&R&S（Risk, Reward & Stop）⏸ 暫不計分
+
+> **暫時 ignore**：`RRS_EDGE_SCORING_ENABLED = False` — 總分唔計 #6；Entry Plan 章節仍可作參考。finetune 好再開返。
 
 **M.E.T.A.** — **M**oney **E**ntry **T**arget **A**lignment：入場、止損、目標、RR 四者必須一齊合理先入場（唔係淨睇圖形）。
 
@@ -416,7 +418,9 @@ Implemented: `assess_broad_market_edge()` + `yf_live_quote()` — SPY hist from 
 
 ---
 
-### Edge #8 — F.T.（First Touch / META 進場）✅ V2
+### Edge #8 — F.T.（First Touch / META 進場）⏸ 暫不計分
+
+> **暫時 ignore**：`FT_EDGE_SCORING_ENABLED = False` — 報告總分唔計 #8，子項章節唔輸出；dashboard 仍顯示作參考。finetune 好再開返。
 
 META 進場策略：**盡量做第1或第2次 touch**（力量最強）；第2次仍理想；第3/4次要小心、偏短線；第4次後易多次穿越、力量減弱。
 

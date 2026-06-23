@@ -1,0 +1,27 @@
+﻿2025-11-01 default pass False W 0 D 1
+ W ma_turn False
+ W down_vol False
+ W up_vol False
+ W big_bull True
+ D ma_turn False
+ D down_vol True
+ D up_vol False
+ D big_bull True
+2025-11-14 default pass False W 1 D 1
+ W ma_turn False
+ W down_vol False
+ W up_vol True
+ W big_bull True
+ D ma_turn False
+ D down_vol True
+ D up_vol False
+ D big_bull True
+2025-11-21 default pass False W 1 D 0
+ W ma_turn False
+ W down_vol False
+ W up_vol True
+ W big_bull True
+ D ma_turn False
+ D down_vol False
+ D up_vol False
+ D big_bull True

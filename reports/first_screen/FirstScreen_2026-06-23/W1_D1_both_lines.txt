@@ -1,0 +1,9 @@
+# 2 symbols · 2 sections (### = Sector/Industry group headers, not tickers)
+
+### Consumer services — Other consumer services
+
+NYSE:LTH
+
+### Finance — Investment managers
+
+NYSE:BEN

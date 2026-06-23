@@ -1,0 +1,13 @@
+# 3 symbols · 3 sections (### = Sector/Industry group headers, not tickers)
+
+### Retail trade — Apparel/Footwear retail
+
+NYSE:VSXY
+
+### Retail trade — Department stores
+
+NYSE:M
+
+### Retail trade — Specialty stores
+
+NYSE:WSM

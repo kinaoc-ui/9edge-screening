@@ -1,0 +1,14 @@
+# 4 symbols · 3 sections (### = Sector/Industry group headers, not tickers)
+
+### Technology services — Data processing services
+
+NASDAQ:APLD
+NASDAQ:MARA
+
+### Technology services — Information technology services
+
+NASDAQ:XMTR
+
+### Technology services — Packaged software
+
+NASDAQ:AFRM

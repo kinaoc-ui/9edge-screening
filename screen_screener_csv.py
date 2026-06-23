@@ -24,11 +24,11 @@ TV_EXPORT = REPORTS / "tv_import"
 
 # Official TV import: *_comma.txt only (see README_TV_IMPORT.txt)
 TV_WATCHLIST_IMPORT_OPTIONS: list[tuple[str, str]] = [
-    ("AB_grade_comma.txt", "AB 短名單（雙 Setup ≥3R）"),
-    ("A_grade_comma.txt", "A 級全部"),
-    ("B_grade_comma.txt", "B 級 Watch"),
-    ("Potential_Top20_comma.txt", "潛力榜 Top 20"),
-    ("Score7plus_comma.txt", f"現況 ≥7/{eng.EDGE_SCORE_MAX}"),
+    ("AB_grade_comma.txt", "AB 短名單（含 Sector / Industry）"),
+    ("A_grade_comma.txt", "A 級全部（含 Sector / Industry）"),
+    ("B_grade_comma.txt", "B 級 Watch（含 Sector / Industry）"),
+    ("Potential_Top20_comma.txt", "潛力榜 Top 20（含 Sector / Industry）"),
+    ("Score7plus_comma.txt", f"現況 ≥7/{eng.EDGE_SCORE_MAX}（含 Sector / Industry）"),
 ]
 
 TV_EXCHANGE_MAP = {
@@ -218,26 +218,51 @@ def list_tv_export_dirs() -> list[Path]:
     )
 
 
-def parse_comma_watchlist(path: Path) -> list[str]:
-    """Parse EXCHANGE:SYMBOL comma list from official TV import .txt."""
+def parse_tv_watchlist(path: Path) -> list[str]:
+    """Parse TV import .txt — flat comma, line-by-line, or ### Sector — Industry sections."""
     if not path.is_file():
         return []
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return []
-    return [t.strip() for t in text.split(",") if t.strip()]
+    symbols: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "," in line:
+            for part in line.split(","):
+                tok = part.strip()
+                if tok and ":" in tok:
+                    symbols.append(tok)
+        elif ":" in line:
+            symbols.append(line)
+    return symbols
 
 
-def watchlist_import_path(export_dir: Path, filename: str) -> Path | None:
-    p = export_dir / filename
-    return p if p.is_file() else None
+def parse_comma_watchlist(path: Path) -> list[str]:
+    """Backward-compatible alias."""
+    return parse_tv_watchlist(path)
 
 
 def write_tv_txt(tickers: list[str], path: Path, *, comma: bool = True) -> None:
-    """TradingView official import: .txt, EXCHANGE:SYMBOL, comma-separated."""
+    """Legacy flat list (no sector headers) — prefer write_tv_import_txt for TV import."""
     path.parent.mkdir(parents=True, exist_ok=True)
     body = ",".join(tickers) if comma else "\n".join(tickers)
     path.write_text(body + "\n", encoding="utf-8")
+
+
+def write_tv_import_txt(
+    rows: list[dict],
+    path: Path,
+    *,
+    group_label: str = "",
+    use_tv_ticker: bool = True,
+) -> None:
+    """TV watchlist import with ### Sector — Industry section headers (required)."""
+    write_tv_sector_industry_txt(
+        rows,
+        path,
+        group_label=group_label,
+        use_tv_ticker=use_tv_ticker,
+    )
 
 
 def write_tv_sector_industry_txt(
@@ -247,7 +272,7 @@ def write_tv_sector_industry_txt(
     group_label: str = "A_Grade",
     use_tv_ticker: bool = False,
 ) -> None:
-    """Human-readable watchlist: ### Group — Sector — Industry, then one symbol per line."""
+    """TV import: ### Sector — Industry headers, then EXCHANGE:SYMBOL per line."""
     path.parent.mkdir(parents=True, exist_ok=True)
     groups: dict[tuple[str, str], list[dict]] = {}
     for x in rows:
@@ -256,8 +281,18 @@ def write_tv_sector_industry_txt(
         groups.setdefault((sec, ind), []).append(x)
 
     lines: list[str] = []
+    symbol_count = len(rows)
+    section_count = len(groups)
+    lines.append(
+        f"# {symbol_count} symbols · {section_count} sections "
+        f"(### = Sector/Industry group headers, not tickers)"
+    )
+    lines.append("")
     for (sec, ind), grp in sorted(groups.items()):
-        lines.append(f"### {group_label} — {sec} — {ind}")
+        if group_label:
+            lines.append(f"### {group_label} — {sec} — {ind}")
+        else:
+            lines.append(f"### {sec} — {ind}")
         lines.append("")
         for x in sorted(grp, key=lambda r: (-int(r.get("score") or 0), r["symbol"])):
             sym = x["tv_ticker"] if use_tv_ticker else x["symbol"]
@@ -267,13 +302,31 @@ def write_tv_sector_industry_txt(
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _export_tv_group(
+    group_rows: list[dict],
+    out_dir: Path,
+    stem: str,
+    *,
+    group_label: str = "",
+) -> None:
+    """Write *_comma.txt and *_lines.txt — both with Sector / Industry sections."""
+    if not group_rows:
+        return
+    write_tv_import_txt(
+        group_rows, out_dir / f"{stem}_comma.txt", group_label=group_label, use_tv_ticker=True
+    )
+    write_tv_import_txt(
+        group_rows, out_dir / f"{stem}_lines.txt", group_label=group_label, use_tv_ticker=True
+    )
+
+
 def _export_rows_by_sector(
     rows: list[dict],
     out_dir: Path,
     *,
     folder_name: str,
 ) -> None:
-    """One comma .txt per sector — TV 要分 sector 就逐個 import。"""
+    """One .txt per sector — each file has Sector / Industry section headers."""
     if not rows:
         return
     sector_dir = out_dir / folder_name
@@ -283,10 +336,9 @@ def _export_rows_by_sector(
         sec = x.get("sector") or "Unknown"
         by_sector.setdefault(sec, []).append(x)
     for sec, sec_rows in sorted(by_sector.items()):
-        tickers = [x["tv_ticker"] for x in sec_rows]
         fname = _safe_filename(sec)
-        write_tv_txt(tickers, sector_dir / f"{fname}_comma.txt", comma=True)
-        write_tv_txt(tickers, sector_dir / f"{fname}_lines.txt", comma=False)
+        write_tv_import_txt(sec_rows, sector_dir / f"{fname}_comma.txt", use_tv_ticker=True)
+        write_tv_import_txt(sec_rows, sector_dir / f"{fname}_lines.txt", use_tv_ticker=True)
 
 
 def _export_rows_by_sector_industry(
@@ -295,7 +347,7 @@ def _export_rows_by_sector_industry(
     *,
     folder_name: str,
 ) -> None:
-    """One comma .txt per sector+industry — 可直接 import 做分組 watchlist。"""
+    """One .txt per sector+industry — single ### Sector — Industry section per file."""
     if not rows:
         return
     si_dir = out_dir / folder_name
@@ -306,10 +358,9 @@ def _export_rows_by_sector_industry(
         ind = x.get("industry") or "Unknown"
         groups.setdefault((sec, ind), []).append(x)
     for (sec, ind), grp in sorted(groups.items()):
-        tickers = [x["tv_ticker"] for x in grp]
         fname = f"{_safe_filename(sec)}__{_safe_filename(ind)}"
-        write_tv_txt(tickers, si_dir / f"{fname}_comma.txt", comma=True)
-        write_tv_txt(tickers, si_dir / f"{fname}_lines.txt", comma=False)
+        write_tv_import_txt(grp, si_dir / f"{fname}_comma.txt", use_tv_ticker=True)
+        write_tv_import_txt(grp, si_dir / f"{fname}_lines.txt", use_tv_ticker=True)
 
 
 def enrich_result_row(r: dict, meta: dict[str, dict], tv_cache: dict[str, str]) -> dict:
@@ -377,60 +428,31 @@ def export_tv_watchlists(
     readme.write_text(
         "TradingView Watchlist Import\n"
         "============================\n\n"
-        "Format: .TXT (唔係 CSV / MLB)\n"
-        "Official: EXCHANGE:SYMBOL, comma-separated\n\n"
+        "Format: .TXT — 每個 import 檔都有 ### Sector — Industry 分組標題\n"
+        "Symbols: EXCHANGE:SYMBOL（每行一隻，跟喺對應 section 下面）\n\n"
         "Import steps:\n"
         "1. Open TradingView → Watchlist panel (right side)\n"
         "2. Click watchlist name → menu (⋯) → Upload list / Import list\n"
         "3. Select the .txt file (Pro plan required)\n\n"
         "Files:\n"
-        "  A_grade_comma.txt       — A 級全部（comma，官方 import 格式）\n"
-        "  A_grade_lines.txt       — A 級（每行一隻 EXCHANGE:SYMBOL）\n"
-        "  A_grade_by_sector_industry.txt — A 級按 Sector + Industry 分組（參考 TV_Watchlist 格式）\n"
+        "  A_grade_comma.txt       — A 級全部（含 Sector / Industry 分組）\n"
         "  B_grade_comma.txt       — B 級 Watch\n"
-        "  B_grade_by_sector_industry.txt — B 級按 Sector + Industry 分組\n"
-        "  AB_grade_comma.txt      — A/B 級 + 雙 Setup valid + 至少一個 ≥3R\n"
-        "  AB_grade_by_sector_industry.txt — 同上，按 Sector + Industry 分組（參考）\n"
-        "  AB_by_sector/*.txt           — AB 短名單按 Sector（逐個 import = 分 sector）\n"
-        "  AB_by_sector_industry/*.txt   — AB 按 Sector+Industry（逐個 import）\n"
+        "  AB_grade_comma.txt      — AB 短名單（雙 Setup ≥3R）\n"
         "  Potential_Top20_comma.txt — 潛力榜 Top 20\n"
         "  Score7plus_comma.txt    — 現況 ≥7\n"
-        "  A_by_sector/*.txt        — A 級只按 Sector 分組（comma）\n"
-        "  classified_full.csv      — 完整表（含 Sector / Industry / tv_ticker）\n\n"
-        "Note: TV 官方 comma import 唔支援 sector header（會變一個 flat list）。\n"
-        "      要分 sector → import AB_by_sector/ 入面每個檔做一個 watchlist。\n"
+        "  AB_by_sector/*.txt      — AB 按 Sector（每檔一個 sector）\n"
+        "  AB_by_sector_industry/*.txt — AB 按 Sector+Industry\n"
+        "  classified_full.csv     — 完整表（含 Sector / Industry / tv_ticker）\n\n"
+        "Note: 所有 *_comma.txt / *_lines.txt 都用 ### Sector — Industry 格式。\n"
         "      紅色 symbol = exchange 錯（已改用 screener CSV Exchange 欄）。\n",
         encoding="utf-8",
     )
 
-    def _export_group(group_rows: list[dict], stem: str) -> None:
-        tickers = [x["tv_ticker"] for x in group_rows]
-        if not tickers:
-            return
-        write_tv_txt(tickers, out_dir / f"{stem}_comma.txt", comma=True)
-        write_tv_txt(tickers, out_dir / f"{stem}_lines.txt", comma=False)
-
-    _export_group(a_rows, "A_grade")
-    _export_group(b_rows, "B_grade")
-    _export_group(ab_rows, "AB_grade")
-    _export_group(pot_rows, "Potential_Top20")
-    _export_group(g7_rows, "Score7plus")
-
-    if a_rows:
-        write_tv_sector_industry_txt(
-            a_rows, out_dir / "A_grade_by_sector_industry.txt",
-            group_label="A_Grade", use_tv_ticker=True,
-        )
-    if b_rows:
-        write_tv_sector_industry_txt(
-            b_rows, out_dir / "B_grade_by_sector_industry.txt",
-            group_label="B_Grade", use_tv_ticker=True,
-        )
-    if ab_rows:
-        write_tv_sector_industry_txt(
-            ab_rows, out_dir / "AB_grade_by_sector_industry.txt",
-            group_label="AB_Grade", use_tv_ticker=True,
-        )
+    _export_tv_group(a_rows, out_dir, "A_grade")
+    _export_tv_group(b_rows, out_dir, "B_grade")
+    _export_tv_group(ab_rows, out_dir, "AB_grade")
+    _export_tv_group(pot_rows, out_dir, "Potential_Top20")
+    _export_tv_group(g7_rows, out_dir, "Score7plus")
 
     _export_rows_by_sector(a_rows, out_dir, folder_name="A_by_sector")
     _export_rows_by_sector(ab_rows, out_dir, folder_name="AB_by_sector")

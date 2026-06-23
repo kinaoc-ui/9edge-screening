@@ -1,0 +1,2 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+WT,NYSE:WT,Miscellaneous,Investment trusts,"WisdomTree, Inc.",A,W1,True,2,1,3,18.81,W1 2/3：MA轉上；股跌日量低；大陽2根 | D1 1/3：股跌日量低 | 跌市反向：3M 39.6% vs SPY 12.9% | 領先MA：股 $18.81 [10上/20上/50上] 3/3 vs SPY $737.97 [10下/20下/50上] 1/3

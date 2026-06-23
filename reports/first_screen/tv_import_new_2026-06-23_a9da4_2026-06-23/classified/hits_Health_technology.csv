@@ -1,0 +1,10 @@
+﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
+NUVL,NASDAQ:NUVL,Health technology,Pharmaceuticals: major,"Nuvalent, Inc.",A+,W1+D1,True,3,3,6,123.42,W1 3/3：MA轉上；量價配合 | D1 3/3：MA轉上；量價配合
+IMVT,NASDAQ:IMVT,Health technology,Biotechnology,"Immunovant, Inc.",A+,W1+D1,True,3,3,6,38.1,W1 3/3：MA轉上；量價配合 | D1 3/3：MA轉上；量價配合
+RVMD,NASDAQ:RVMD,Health technology,Pharmaceuticals: other,"Revolution Medicines, Inc.",A,D1,True,2,3,5,165.81,W1 2/3：量價配合 | D1 3/3：MA轉上；量價配合
+ILMN,NASDAQ:ILMN,Health technology,Medical specialties,"Illumina, Inc.",A,W1,True,3,2,5,161.38,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+VCYT,NASDAQ:VCYT,Health technology,Medical specialties,"Veracyte, Inc.",A,W1,True,3,2,5,53.19,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
+MIRM,NASDAQ:MIRM,Health technology,Pharmaceuticals: major,"Mirum Pharmaceuticals, Inc.",A,D1,True,1,3,4,107.77,W1 1/3：MA轉上 | D1 3/3：MA轉上；量價配合
+LIVN,NASDAQ:LIVN,Health technology,Medical specialties,LivaNova PLC,A,W1,True,3,1,4,78.71,W1 3/3：MA轉上；量價配合 | D1 1/3：MA轉上
+GH,NASDAQ:GH,Health technology,Medical specialties,"Guardant Health, Inc.",A,W1,True,3,0,3,128.83,W1 3/3：MA轉上；量價配合 | D1 0/3：未達
+CNTA,NASDAQ:CNTA,Health technology,Pharmaceuticals: major,Centessa Pharmaceuticals plc,A,D1,True,0,3,3,40.18,W1 0/3：未達 | D1 3/3：MA轉上；量價配合
