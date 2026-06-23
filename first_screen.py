@@ -113,6 +113,7 @@ class TfFilter:
     down_vol: bool = False
     up_vol: bool = False
     big_bull: bool = False
+    pullback_turn: bool = False
 
     def is_active(self) -> bool:
         return (
@@ -121,6 +122,7 @@ class TfFilter:
             or self.down_vol
             or self.up_vol
             or self.big_bull
+            or self.pullback_turn
         )
 
     def required_keys(self) -> list[str]:
@@ -129,6 +131,8 @@ class TfFilter:
         keys: list[str] = []
         if self.ma_turn:
             keys.append("ma_turn")
+        if self.pullback_turn:
+            keys.append("pullback_turn")
         if self.down_vol:
             keys.append("down_vol")
         if self.up_vol:
@@ -145,6 +149,7 @@ class TfFilter:
             return ""
         names = {
             "ma_turn": "MA轉上",
+            "pullback_turn": "拉回後轉上",
             "down_vol": "股跌日量低",
             "up_vol": "股升日量高",
             "big_bull": "大陽燭",
@@ -347,6 +352,16 @@ def assess_ma_turn_up(bars: list[dict]) -> dict:
     }
 
 
+def assess_pullback_ma_turn(bars: list[dict], *, peak_window: int = 50) -> dict:
+    closes = [b["close"] for b in bars]
+    s10 = tv.sma(closes, 10)
+    s20 = tv.sma(closes, 20)
+    ok, detail = tv.detect_pullback_ma_turn_up(
+        bars, s10, s20, closes[-1], peak_window=peak_window,
+    )
+    return {"pass": ok, "detail": detail}
+
+
 def assess_big_bullish_candles(bars: list[dict], *, cfg: BigBullPassConfig) -> dict:
     """大陽燭：body≥1.8×近均 body 且 body 佔 range≥55%（同 9-edge Edge #3）。"""
     fail = {
@@ -414,6 +429,8 @@ def assess_tf_screen(
         return empty
 
     ma = assess_ma_turn_up(bars)
+    pb_peak = 12 if tf_label == "W1" else 50
+    pb = assess_pullback_ma_turn(bars, peak_window=pb_peak)
     vol = assess_volume_up_down(
         bars, window=volume_window, vol_ma_len=volume_ma_len, vol_cfg=vol_cfg
     )
@@ -425,6 +442,7 @@ def assess_tf_screen(
     vol_note = vol.get("note", "")
     checks = [
         ("ma_turn", "① MA 由平/下轉上", ma["pass"], ma["detail"]),
+        ("pullback_turn", "①b 拉回後轉上", pb["pass"], pb["detail"]),
         ("down_vol", "② 股跌日量低", down_low, vol_note),
         ("up_vol", "③ 股升日量高", up_high, vol_note),
         ("big_bull", "④ 大陽燭", bool(bull.get("pass")), bull.get("note", "")),
@@ -437,6 +455,8 @@ def assess_tf_screen(
     notes = []
     if ma["pass"]:
         notes.append(f"MA轉上")
+    if pb["pass"]:
+        notes.append("拉回後轉上")
     if up_high and down_low:
         notes.append("量價配合")
     elif up_high:
@@ -454,6 +474,7 @@ def assess_tf_screen(
         "grade": grade,
         "check_rows": rows,
         "ma": ma,
+        "pullback": pb,
         "volume": vol,
         "big_bull": bull,
         "close": round(last["close"], 2),

@@ -1,0 +1,4 @@
+﻿FIRST PASS FOUND 2024-01-27 W 2 D 3 D1
+ D ma_turn True
+ D down_vol True
+ D up_vol True

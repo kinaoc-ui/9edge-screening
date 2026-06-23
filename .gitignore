@@ -21,8 +21,9 @@ charts/**/*.jpeg
 charts/**/*.webp
 charts/**/*.gif
 
-# Cursor IDE (local only)
+# Cursor IDE + local UI prefs (local only)
 .cursor/
+.local/
 
 # Archive / legacy bats (optional local)
 _archive/

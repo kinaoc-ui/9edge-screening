@@ -1861,6 +1861,56 @@ def detect_ma_inflection_up(
     return False, "；".join(gaps) if gaps else "條件未齊"
 
 
+def detect_pullback_ma_turn_up(
+    bars: list[dict],
+    s10: list[float],
+    s20: list[float],
+    close: float,
+    *,
+    peak_window: int = 50,
+    min_drop: float = 0.12,
+    min_recov: float = 0.03,
+) -> tuple[bool, str]:
+    """大跌 → 橫行/走平 → 10MA 再向上（MU 11/18 類：入場喺轉上日，唔係跌日）。"""
+    i = len(bars) - 1
+    if i < peak_window + 5 or len(s10) < peak_window + 5:
+        return False, "K 線不足"
+
+    seg = bars[-peak_window:]
+    peak = max(b["high"] for b in seg)
+    trough = min(b["low"] for b in seg)
+    if peak <= 0 or trough <= 0:
+        return False, "高低價異常"
+
+    drop = (peak - trough) / peak
+    recov = (close - trough) / trough
+    ma_was_soft = s10[i - 20] <= s10[i - 28] * 1.015 or s10[i - 12] <= s10[i - 20] * 1.01
+    ma_rising = s10[i] > s10[i - 2] > s10[i - 4] and s10[i] > s10[i - 8]
+    above_10 = close > s10[i]
+    near_stack = s10[i] >= s20[i] * 0.97
+
+    if drop >= min_drop and recov >= min_recov and ma_was_soft and ma_rising and above_10 and near_stack:
+        return True, (
+            f"拉回後轉上：峰谷跌 {drop:.0%}、自低彈 {recov:.0%}；"
+            f"10MA {s10[i-8]:.1f}→{s10[i]:.1f} 再向上"
+        )
+
+    gaps: list[str] = []
+    if drop < min_drop:
+        gaps.append(f"拉回幅度不足({drop:.0%}<{min_drop:.0%})")
+    if recov < min_recov:
+        gaps.append(f"自谷底彈升不足({recov:.0%})")
+    if not ma_was_soft:
+        gaps.append("10MA 未見走平/向下")
+    if not ma_rising:
+        gaps.append("10MA 未再向上")
+    if not above_10:
+        gaps.append("收市未升穿 10MA")
+    if not near_stack:
+        gaps.append("10/20MA 未貼近")
+    return False, "；".join(gaps) if gaps else "拉回轉上未齊"
+
+
 def assess_pullback_volume_profile(
     bars: list[dict],
     *,
