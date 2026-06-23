@@ -8,9 +8,8 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import streamlit as st
 
@@ -21,11 +20,9 @@ from edge_common import (
     list_recent_reports,
     run_analyze_from_csv,
     run_analyze_from_yfinance,
+    run_backtest_from_yfinance,
     save_csv_uploads,
 )
-
-if TYPE_CHECKING:
-    import screen_screener_csv as screener
 
 _SCREENER: object | None = None
 _TV: object | None = None
@@ -771,13 +768,143 @@ def run_csv_analysis(
         st.session_state["last_error"] = result.error
 
 
-def run_yfinance_analysis(sym: str) -> None:
+def run_backtest_scan(
+    sym: str,
+    scan_start: date,
+    scan_end: date,
+    *,
+    grade_mode: str,
+    key_prefix: str,
+) -> None:
     sym = (sym or "").strip().upper()
     if not sym:
         st.session_state["last_error"] = "請輸入股票代號"
         return
-    with st.spinner(f"yfinance 拉 W1/D1/H1 + 分析 {sym}..."):
-        result = run_analyze_from_yfinance(sym)
+    if scan_start > scan_end:
+        scan_start, scan_end = scan_end, scan_start
+
+    import backtest_9edge as bt
+
+    progress = st.progress(0.0, text="準備掃描…")
+    status = st.empty()
+    logs: list[str] = [f"掃描 {sym}：{scan_start} → {scan_end}（{grade_mode}）"]
+
+    def on_progress(done: int, total: int, cur: date) -> None:
+        progress.progress(done / max(total, 1), text=f"掃描中 {cur.isoformat()} ({done}/{total})")
+        status.caption(f"正在處理 **{cur.isoformat()}** …")
+
+    grades = bt.grade_filter_set(grade_mode)
+    rows = bt.scan_backtest_range(
+        sym,
+        scan_start,
+        scan_end,
+        grades=grades,
+        progress_callback=on_progress,
+    )
+    progress.empty()
+    status.empty()
+    st.session_state[f"{key_prefix}_backtest_scan_rows"] = [r.__dict__ for r in rows]
+    st.session_state[f"{key_prefix}_backtest_scan_sym"] = sym
+    logs.append(f"完成：{len(rows)} 日符合篩選")
+    st.session_state["last_logs"] = logs
+    st.session_state.pop("last_error", None)
+    st.toast(f"掃描完成：{len(rows)} 日", icon="📊")
+
+
+def render_backtest_panel(default_sym: str = "", *, key_prefix: str = "bt") -> str:
+    """回測單日 + 日期區間掃描。Returns current symbol text."""
+    st.markdown("**📅 回測（as-of）**")
+    st.caption(
+        "只用該日及之前 K 線；**入場日前一日** 出信號（例：4/22 入場 → 回測 4/21）。"
+        " 即時分析唔勾回測。"
+    )
+    sym = st.text_input(
+        "股票代號",
+        value=default_sym,
+        placeholder="MU、NVDA、WOLF…",
+        key=f"{key_prefix}_symbol",
+    ).strip().upper()
+
+    use_bt = st.checkbox("回測模式（指定 as-of 日期）", key=f"{key_prefix}_use_backtest")
+    as_of: date | None = None
+    if use_bt:
+        as_of = st.date_input(
+            "回測日期",
+            value=date(2026, 4, 21),
+            max_value=date.today(),
+            key=f"{key_prefix}_backtest_date",
+        )
+
+    if st.button("🔍 分析", type="primary", use_container_width=True, key=f"{key_prefix}_analyze"):
+        run_yfinance_analysis(sym or default_sym, as_of=as_of if use_bt else None)
+
+    with st.expander("📊 日期區間掃描（搵 Grade A/B）", expanded=False):
+        st.caption("由結束日向前掃到開始日；慢（每日約 1–2 秒），請耐心等。")
+        c1, c2 = st.columns(2)
+        with c1:
+            scan_end = st.date_input(
+                "結束日",
+                value=date(2026, 4, 21),
+                max_value=date.today(),
+                key=f"{key_prefix}_scan_end",
+            )
+        with c2:
+            scan_start = st.date_input(
+                "開始日",
+                value=date(2026, 1, 1),
+                max_value=date.today(),
+                key=f"{key_prefix}_scan_start",
+            )
+        grade_mode = st.selectbox(
+            "只顯示",
+            ["A", "AB", "all"],
+            format_func=lambda x: {"A": "Grade A", "AB": "Grade A + B", "all": "全部"}[x],
+            key=f"{key_prefix}_scan_grades",
+        )
+        if st.button("開始掃描", use_container_width=True, key=f"{key_prefix}_scan_run"):
+            run_backtest_scan(sym or default_sym, scan_start, scan_end, grade_mode=grade_mode, key_prefix=key_prefix)
+
+        rows = st.session_state.get(f"{key_prefix}_backtest_scan_rows") or []
+        scan_sym = st.session_state.get(f"{key_prefix}_backtest_scan_sym") or sym
+        if rows:
+            st.caption(f"**{scan_sym}** · {len(rows)} 日符合 · 新→舊")
+            table = [
+                {
+                    "日期": r["as_of"],
+                    "分數": f"{r['total_score']}/{r['max_score']}",
+                    "Grade": r["grade"],
+                    "Decision": r["decision"],
+                    "收市": f"${r['price']:.2f}",
+                }
+                for r in rows
+            ]
+            st.dataframe(table, use_container_width=True, hide_index=True)
+
+            pick_dates = [r["as_of"] for r in rows]
+            picked = st.selectbox(
+                "開啟該日完整報告",
+                pick_dates,
+                key=f"{key_prefix}_scan_pick",
+            )
+            if st.button("📄 載入選中日期報告", key=f"{key_prefix}_scan_open"):
+                picked_date = date.fromisoformat(picked)
+                run_yfinance_analysis(scan_sym, as_of=picked_date)
+
+    return sym
+
+
+def run_yfinance_analysis(sym: str, *, as_of: date | None = None) -> None:
+    sym = (sym or "").strip().upper()
+    if not sym:
+        st.session_state["last_error"] = "請輸入股票代號"
+        return
+    label = f"回測 {sym} @ {as_of}" if as_of else f"yfinance 拉 W1/D1/H1 + 分析 {sym}"
+    with st.spinner(label + "..."):
+        result = (
+            run_backtest_from_yfinance(sym, as_of)
+            if as_of
+            else run_analyze_from_yfinance(sym)
+        )
     st.session_state["last_logs"] = result.logs
     if result.ok:
         title = (
@@ -812,18 +939,7 @@ def render_status_row(connected: bool, chart_sym: str, chart_tf: str) -> None:
 
 
 def render_cloud_toolbar(default_sym: str = "") -> None:
-    c1, c2 = st.columns([5, 1])
-    with c1:
-        sym = st.text_input(
-            "股票代號",
-            value=default_sym,
-            placeholder="輸入代號，例如 WOLF、TSM、NVDA",
-            key="cloud_symbol_input",
-            label_visibility="collapsed",
-        )
-    with c2:
-        if st.button("🔍 分析", type="primary", use_container_width=True):
-            run_yfinance_analysis(sym or default_sym)
+    render_backtest_panel(default_sym, key_prefix="cloud_bt")
 
 
 def render_cloud_sidebar() -> None:
@@ -981,6 +1097,12 @@ def render_local_toolbar(
     *,
     key_prefix: str,
 ) -> None:
+    st.subheader("📅 回測 · yfinance")
+    render_backtest_panel(
+        (symbol_override or csv_sym or "").upper(),
+        key_prefix=f"{key_prefix}_backtest",
+    )
+    st.divider()
     st.subheader("📺 第一步 · 開 TradingView")
     st.caption("關閉 TradingView 後撳掣，等 CDP ready（約 5–10 秒）再分析。")
     if st.button(

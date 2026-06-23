@@ -231,6 +231,45 @@ def run_analyze_from_csv(
         return result
 
 
+def run_backtest_from_yfinance(symbol: str, as_of: date) -> PipelineResult:
+    logs: list[str] = []
+    sym = short_symbol(symbol or "")
+    if not sym:
+        return PipelineResult(ok=False, error="請輸入股票代號", logs=logs)
+
+    result = PipelineResult(ok=False, symbol=sym, logs=logs)
+    try:
+        mod = _reload_analyze_module()
+        logs.append(f"回測分析：{sym} @ {as_of.isoformat()}")
+        data = mod.run_backtest(sym, as_of)
+        if data is None:
+            result.error = f"回測失敗：{sym} @ {as_of}（數據不足）"
+            logs.append(result.error)
+            return result
+
+        report_md = mod.format_md(data)
+        report_dir = get_reports_dir()
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{sym}_{as_of.isoformat()}_9edge_backtest.md"
+        report_path.write_text(report_md, encoding="utf-8")
+
+        result.ok = True
+        result.report_path = report_path
+        result.report_md = report_md
+        result.grade = data.get("grade", "")
+        result.total_score = data.get("total_score", 0)
+        result.decision = data.get("decision", "")
+        logs.append(
+            f"Backtest: {mod.edge_score_fmt(result.total_score)} Grade {result.grade} "
+            f"@ {as_of} · ${data.get('price')}"
+        )
+        return result
+    except Exception as e:
+        result.error = str(e)
+        logs.append(f"ERROR: {e}")
+        return result
+
+
 def run_analyze_from_yfinance(symbol: str) -> PipelineResult:
     logs: list[str] = []
     sym = short_symbol(symbol or "")

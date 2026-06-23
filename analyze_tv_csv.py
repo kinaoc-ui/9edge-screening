@@ -14,7 +14,7 @@ import argparse
 import csv
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -920,6 +920,8 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     ma_bear_aligned = s5[-1] < s10[-1] < s20[-1]
     ma20_slope_up = s20[-1] > s20[-6]
     ma20_slope_down = s20[-1] < s20[-6]
+    ma_turn_up = detect_ma_inflection_up(s5, s10, s20)
+    ma_bull_ok = (ma_bull_aligned and ma20_slope_up) or ma_turn_up
     n = len(bars)
     closes_below_s20 = sum(
         1 for i, b in enumerate(bars[-10:])
@@ -965,14 +967,21 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         or big_vol_count >= 2
     )
     vol_ratio = vol_last / avg_vol if avg_vol else 0
+    pullback_vol = assess_pullback_volume_profile(bars)
+    recent12 = bars[-12:]
+    r_up = sum(b["volume"] for b in recent12 if b["close"] >= b["open"])
+    r_down = sum(b["volume"] for b in recent12 if b["close"] < b["open"])
+    near_wave_top = c >= prior_top * 0.88
+    accumulation = r_up > r_down * 1.05
+    volume_ok = large_volume or pullback_vol["pass"] or (ma_turn_up and near_wave_top and accumulation)
 
     # --- 升勢動能綜合 (long system) ---
     bull_checks = {
-        "ma_aligned": ma_bull_aligned and ma20_slope_up,
+        "ma_aligned": ma_bull_ok,
         "ma20_respect": ma20_respect_up and c > s20[-1],
         "wave_structure": hh_hl or momentum_break_up,
         "big_candles": frequent_big,
-        "large_volume": large_volume,
+        "large_volume": volume_ok,
     }
     bull_score = sum(bull_checks.values())
 
@@ -985,12 +994,22 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     }
     bear_score = sum(bear_checks.values())
 
-    momentum_pass = bull_score >= 4 and bull_checks["ma_aligned"] and bull_checks["large_volume"]
+    momentum_pass = (
+        bull_score >= 4 and bull_checks["ma_aligned"] and bull_checks["large_volume"]
+    ) or (
+        ma_turn_up
+        and bull_checks["large_volume"]
+        and bull_checks["wave_structure"]
+        and bull_checks["ma20_respect"]
+        and bull_score >= 3
+    )
     bear_pass = bear_score >= 4 and bear_checks["ma_aligned"] and bear_checks["large_volume"]
     trend_dir = "升勢" if bull_score >= bear_score else "跌勢"
 
     notes = []
-    if bull_checks["ma_aligned"]:
+    if ma_turn_up and not (ma_bull_aligned and ma20_slope_up):
+        notes.append(f"MA轉向上(10MA {s10[-15]:.2f}→{s10[-1]:.2f})" if len(s10) > 15 else "MA轉向上")
+    elif bull_checks["ma_aligned"]:
         notes.append(f"5/10/20MA 同向向上({s5[-1]:.2f}/{s10[-1]:.2f}/{s20[-1]:.2f})")
     else:
         notes.append("均線未完全同向")
@@ -1004,6 +1023,10 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         notes.append(f"大K線頻繁({big_count}/10)")
     if large_volume:
         notes.append(f"大成交量({vol_ratio:.1f}x均量)")
+    elif pullback_vol["pass"]:
+        notes.append(pullback_vol["note"])
+    elif ma_turn_up and near_wave_top and accumulation:
+        notes.append(f"近段升量>跌量（{r_up / max(r_down, 1):.2f}x）")
     else:
         notes.append("成交量未配合")
 
@@ -1021,6 +1044,8 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         "ema20": round(e20[-1], 2),
         "prior_wave_top": round(prior_top, 2),
         "prior_wave_bottom": round(prior_bot, 2),
+        "ma_turn_up": ma_turn_up,
+        "pullback_volume": pullback_vol,
     }
 
 
@@ -1625,6 +1650,111 @@ def at_key_resistance(bar: dict, sr: dict, mom: dict, tol: float = 0.035) -> boo
     return any(near_price_level(hi, lv, tol) or near_price_level(c, lv, tol) for lv in levels if lv)
 
 
+def detect_ma_inflection_up(
+    s5: list[float],
+    s10: list[float],
+    s20: list[float],
+    *,
+    lookback: int = 15,
+) -> bool:
+    """
+    MA 由平/向下轉向上（例：2月橫行/跌，4/16 起 10MA 再向上）。
+    唔使等完整 5>10>20 維持幾星期。
+    """
+    if len(s10) < lookback + 5 or len(s20) < 8:
+        return False
+    s10_early = s10[-lookback]
+    s10_mid = s10[-lookback // 2]
+    was_flat_or_down = s10_mid <= s10_early * 1.008
+    now_rising = s10[-1] > s10[-4] and s10[-4] >= s10[-7] * 0.998
+    s20_turning = s20[-1] > s20[-6]
+    stacking = s5[-1] > s10[-1] and s10[-1] >= s20[-1] * 0.992
+    return was_flat_or_down and now_rising and s20_turning and stacking
+
+
+def assess_pullback_volume_profile(
+    bars: list[dict],
+    *,
+    window: int = 30,
+) -> dict:
+    """
+    低量拉回 + 升量 > 跌量（關鍵支持後 → 突破前）。
+    由近期浪頂起計拉回段；另計近 12K 升跌量作確認。
+    """
+    fail = {
+        "pass": False,
+        "note": "拉回量價未確認",
+        "up_vol": 0.0,
+        "down_vol": 0.0,
+        "pull_avg": 0.0,
+        "rally_avg": 0.0,
+    }
+    n = len(bars)
+    if n < window + 5:
+        return fail
+
+    seg = bars[-window:]
+    peak_i = max(range(len(seg)), key=lambda i: seg[i]["high"])
+    rally = seg[: peak_i + 1]
+    pull = seg[peak_i:]
+    if len(pull) < 3:
+        return fail
+
+    up_vol = sum(b["volume"] for b in pull if b["close"] >= b["open"])
+    down_vol = sum(b["volume"] for b in pull if b["close"] < b["open"])
+    pull_avg = sum(b["volume"] for b in pull) / len(pull)
+    rally_avg = sum(b["volume"] for b in rally) / max(len(rally), 1)
+
+    recent = bars[-12:]
+    r_up = sum(b["volume"] for b in recent if b["close"] >= b["open"])
+    r_down = sum(b["volume"] for b in recent if b["close"] < b["open"])
+    base_avg = sum(b["volume"] for b in bars[-35:-12]) / max(len(bars[-35:-12]), 1)
+
+    low_vol_pull = pull_avg < rally_avg * 0.95 or pull_avg <= base_avg * 1.02 if rally_avg > 0 else pull_avg <= base_avg * 1.02
+    up_gt_down = up_vol > down_vol * 0.85 or r_up > r_down * 1.08
+    ok = low_vol_pull and up_gt_down
+    ratio_txt = f"{pull_avg / rally_avg:.2f}" if rally_avg > 0 else "—"
+    note = (
+        f"低量拉回（均量{ratio_txt}x浪頂段）"
+        f"；近段升量>{'跌量' if r_up > r_down else '跌量偏弱'}"
+        if ok
+        else "拉回量價未確認"
+    )
+    return {
+        "pass": ok,
+        "note": note,
+        "up_vol": up_vol,
+        "down_vol": down_vol,
+        "pull_avg": pull_avg,
+        "rally_avg": rally_avg,
+    }
+
+
+def count_resistance_touches(
+    bars: list[dict],
+    level: float,
+    *,
+    tol: float = 0.018,
+    lookback: int = 55,
+) -> list[int]:
+    """前浪頂/阻力測試次數（未有效突破前）。"""
+    if level <= 0:
+        return []
+    n = len(bars)
+    start = max(0, n - lookback)
+    idxs: list[int] = []
+    for i in range(start + 1, n):
+        b = bars[i]
+        if b["close"] > level * 1.012:
+            continue
+        near = abs(b["high"] - level) / level <= tol
+        rejected = b["close"] < level * 1.004
+        if near and rejected:
+            if not idxs or i - idxs[-1] >= 5:
+                idxs.append(i)
+    return idxs
+
+
 def prior_pullback(bars: list[dict]) -> bool:
     """前文：跌了一段 / 拉回，先至有 bullish reversal 意義。"""
     closes = [b["close"] for b in bars]
@@ -1695,6 +1825,9 @@ def assess_csr_background(bars: list[dict], sr: dict, mom: dict) -> dict:
         and (at_sup or support_area)
         and area_holds
     )
+    pullback_vol = assess_pullback_volume_profile(bars)
+    if pullback_vol["pass"] and mid_mas_up and long_ma_not_bearish and (at_sup or support_area):
+        natural_pullback = True
 
     natural_rally = (
         prior_rally(bars)
@@ -2462,6 +2595,17 @@ def assess_first_touch(
     long_ma_key = "s10" if ma_bull and closes[-1] > s20[-1] else "s20"
     short_ma_key = "s10" if ma_bear and closes[-1] < s20[-1] else "s20"
 
+    prior_top = float((mom or {}).get("prior_wave_top") or 0)
+    if not prior_top and sr:
+        prior_top = float(sr.get("resistance") or sr.get("wave_top") or 0)
+    near_resistance = (
+        prior_top > 0
+        and closes[-1] >= prior_top * 0.88
+        and closes[-1] < prior_top * 1.012
+    )
+    if near_resistance and ma_bull:
+        long_ma_key = "s10"
+
     def count_area_touches(
         direction: str, zone_lo: float, zone_hi: float,
     ) -> tuple[list[int], str]:
@@ -2528,7 +2672,7 @@ def assess_first_touch(
         area = sr.get("trading_area") or {}
         zone_lo = area.get("zone_lo") or 0
         zone_hi = area.get("zone_hi") or zone_lo
-        if zone_lo > 0 and area.get("edge_count", 0) >= 1:
+        if zone_lo > 0 and area.get("edge_count", 0) >= 1 and not near_resistance:
             if ma_bull and zone_hi <= closes[-1] * 1.002:
                 long_idx, long_label = count_area_touches("long", zone_lo, zone_hi)
                 use_area_long = True
@@ -2590,7 +2734,34 @@ def assess_first_touch(
     eff_long = effective_count(long_idx, at_touch_long)
     eff_short = effective_count(short_idx, at_touch_short)
 
-    def touch_quality(eff: int) -> str:
+    res_idxs: list[int] = []
+    res_2nd = False
+    t10_recent = False
+    # 前浪頂第2次 touch（未破）→ 理想突破前 setup；優先於遠處支持區第3次 touch
+    if near_resistance and prior_top and ma_bull:
+        res_idxs = count_resistance_touches(bars, prior_top)
+        res_recent = res_idxs and (n - 1 - res_idxs[-1] <= 5)
+        res_2nd = len(res_idxs) == 2 and bool(res_recent)
+        if res_2nd:
+            eff_long = 2
+            long_label = f"前浪頂 ${prior_top:.2f}"
+        elif len(res_idxs) >= 2 and res_recent and closes[-1] < prior_top * 1.01:
+            eff_long = 2
+            long_label = f"前浪頂 ${prior_top:.2f}"
+            res_2nd = True
+        elif len(res_idxs) == 1 and res_recent:
+            eff_long = 1
+            long_label = f"前浪頂 ${prior_top:.2f}"
+        t10_idx, _ = count_touches("long", "s10")
+        t10_recent = bool(t10_idx and n - 1 - t10_idx[-1] <= 4)
+        if t10_recent:
+            eff_long = max(eff_long, min(len(t10_idx), 2))
+            if eff_long <= 2 and not res_2nd:
+                long_label = "10MA"
+
+    def touch_quality(eff: int, *, at_resistance_2nd: bool = False) -> str:
+        if at_resistance_2nd:
+            return "ideal"
         if eff <= 0:
             return "none"
         if eff == 1:
@@ -2601,10 +2772,15 @@ def assess_first_touch(
             return "caution"
         return "stale"
 
-    qual_long = touch_quality(eff_long)
+    qual_long = touch_quality(eff_long, at_resistance_2nd=res_2nd)
     qual_short = touch_quality(eff_short)
 
-    recent_long = at_touch_long or (long_idx and n - 1 - long_idx[-1] <= 2)
+    recent_long = (
+        at_touch_long
+        or (long_idx and n - 1 - long_idx[-1] <= 2)
+        or t10_recent
+        or res_2nd
+    )
     recent_short = at_touch_short or (short_idx and n - 1 - short_idx[-1] <= 2)
 
     ft_up = sum(1 for b in bars[-3:] if b["close"] > b["open"]) >= 2
@@ -2623,6 +2799,8 @@ def assess_first_touch(
     )
 
     def fmt_note(eff: int, qual: str, label: str, ma: float, direction: str) -> str:
+        if qual == "ideal" and res_2nd:
+            return f"第2次 {label} touch @ ${prior_top:.2f}（前浪頂，易突破）"
         if qual == "ideal":
             return f"第1次 {label} touch @ ${ma:.2f}（力量最強）"
         if qual == "ok":
@@ -2917,20 +3095,64 @@ def fetch_rs(symbol: str, d1_bars: list[dict] | None = None) -> tuple[int, str]:
 
 
 def yf_daily_bars(ticker: str, period: str = "1y") -> list[dict] | None:
+    return yf_fetch_bars(ticker, "1d", period=period, min_bars=30)
+
+
+def _bar_date_from_index(idx) -> date:
+    if hasattr(idx, "to_pydatetime"):
+        return idx.to_pydatetime().date()
+    if hasattr(idx, "date"):
+        return idx.date()
+    return date.fromisoformat(str(idx)[:10])
+
+
+def yf_fetch_bars(
+    symbol: str,
+    interval: str,
+    *,
+    as_of: date | None = None,
+    period: str | None = None,
+    min_bars: int = 30,
+) -> list[dict] | None:
+    """yfinance OHLCV bars; optional as_of truncates to that calendar date (inclusive)."""
     import yfinance as yf
-    h = yf.Ticker(ticker).history(period=period)
-    if h.empty or len(h) < 30:
+
+    sym = symbol.upper()
+    iv = interval
+    try:
+        if as_of:
+            end = (as_of + timedelta(days=1)).strftime("%Y-%m-%d")
+            if iv in ("1d", "1day"):
+                start = (as_of - timedelta(days=900)).strftime("%Y-%m-%d")
+            elif iv in ("1wk", "1wk"):
+                start = (as_of - timedelta(days=2200)).strftime("%Y-%m-%d")
+            else:
+                start = (as_of - timedelta(days=59)).strftime("%Y-%m-%d")
+            h = yf.Ticker(sym).history(start=start, end=end, interval=iv, auto_adjust=True)
+        else:
+            p = period or {"1d": "2y", "1wk": "5y", "60m": "60d"}.get(iv, "2y")
+            h = yf.Ticker(sym).history(period=p, interval=iv, auto_adjust=True)
+    except Exception:
         return None
-    bars = []
-    for _, row in h.iterrows():
+    if h is None or h.empty:
+        return None
+    bars: list[dict] = []
+    for idx, row in h.iterrows():
+        bar_d = _bar_date_from_index(idx)
+        if as_of and bar_d > as_of:
+            continue
+        o = float(row["Open"])
+        hi = float(row["High"])
+        lo = float(row["Low"])
+        c = float(row["Close"])
+        v = float(row.get("Volume") or 0)
+        if c <= 0:
+            continue
         bars.append({
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": float(row.get("Volume") or 0),
+            "open": o, "high": hi, "low": lo, "close": c, "volume": v,
+            "date": bar_d.isoformat(),
         })
-    return bars
+    return bars if len(bars) >= min_bars else None
 
 
 def _yf_live_quote_impl(ticker: str) -> dict | None:
@@ -3364,6 +3586,75 @@ def assess_bm_pillar_mtf_short(
     return int(ok), f"僅 {source}：{d1.get('trend_dir', '—')} close ${d1['close']:.2f}"
 
 
+def _compose_broad_market_edge(
+    d1_bars: list[dict],
+    w1,
+    h1,
+    *,
+    hist_source: str,
+    price_src: str,
+    close: float,
+    quote: dict | None = None,
+    as_of: date | None = None,
+    qqq_note: str = "",
+) -> dict:
+    d1 = analyze_bars(d1_bars)
+    sr_l, sr_ln = assess_bm_pillar_sr_long(d1)
+    mom_l, mom_ln = assess_bm_pillar_momentum_long(d1_bars)
+    mtf_l, mtf_ln = assess_bm_pillar_mtf_long(w1, d1, h1, hist_source)
+    sr_s, sr_sn = assess_bm_pillar_sr_short(d1, d1_bars)
+    mom_s, mom_sn = assess_bm_pillar_momentum_short(d1_bars)
+    mtf_s, mtf_sn = assess_bm_pillar_mtf_short(w1, d1, h1, hist_source)
+
+    long_count = sr_l + mom_l + mtf_l
+    short_count = sr_s + mom_s + mtf_s
+    long_pass = int(long_count >= 2 and long_count >= short_count)
+    short_pass = int(short_count >= 2 and short_count > long_count)
+
+    if long_pass:
+        bias, directive = "long", "大盤 Long Edge → 積極搵長倉"
+    elif short_pass:
+        bias, directive = "short", "大盤 Short Edge → 積極搵短倉"
+    else:
+        bias, directive = "neutral", "大盤無明確 Edge → 觀望或減倉"
+
+    icon = lambda ok: "✓" if ok else "—"
+    long_note = (
+        f"大盤 Long Edge {long_count}/3：S&R{icon(sr_l)} 動能{icon(mom_l)} MTF{icon(mtf_l)} "
+        f"| {price_src}"
+    )
+    short_note = (
+        f"大盤 Short Edge {short_count}/3：S&R{icon(sr_s)} 動能{icon(mom_s)} MTF{icon(mtf_s)} "
+        f"| {price_src}"
+    )
+
+    out = {
+        "long_pass": long_pass,
+        "short_pass": short_pass,
+        "long_note": long_note,
+        "short_note": short_note,
+        "bias": bias,
+        "directive": directive,
+        "long_count": long_count,
+        "short_count": short_count,
+        "close": close,
+        "source": hist_source if as_of else f"{(quote or {}).get('session', '—')}（hist:{hist_source}）",
+        "qqq_note": qqq_note,
+        "quote": quote,
+        "scoring_enabled": True,
+        "skipped": False,
+        "sector_peers": None,
+        "features": {
+            "sr_zone": {"long": sr_l, "short": sr_s, "long_note": sr_ln, "short_note": sr_sn},
+            "momentum": {"long": mom_l, "short": mom_s, "long_note": mom_ln, "short_note": mom_sn},
+            "mtf": {"long": mtf_l, "short": mtf_s, "long_note": mtf_ln, "short_note": mtf_sn},
+        },
+    }
+    if as_of:
+        out["as_of"] = as_of.isoformat()
+    return out
+
+
 def assess_broad_market_edge() -> dict:
     """
     Edge #7 — Broad Market Edge（大盤 Long/Short Edge）on SPY.
@@ -3390,68 +3681,49 @@ def assess_broad_market_edge() -> dict:
             set_bme_scoring_enabled(False)
             return _broad_market_fail(raw["error"], skipped=True)
         d1_bars = _apply_live_price_to_bars(raw["d1_bars"], quote["price"])
-        d1 = analyze_bars(d1_bars)
         w1, h1, hist_source = raw.get("w1"), raw.get("h1"), raw["source"]
-
-        sr_l, sr_ln = assess_bm_pillar_sr_long(d1)
-        mom_l, mom_ln = assess_bm_pillar_momentum_long(d1_bars)
-        mtf_l, mtf_ln = assess_bm_pillar_mtf_long(w1, d1, h1, hist_source)
-        sr_s, sr_sn = assess_bm_pillar_sr_short(d1, d1_bars)
-        mom_s, mom_sn = assess_bm_pillar_momentum_short(d1_bars)
-        mtf_s, mtf_sn = assess_bm_pillar_mtf_short(w1, d1, h1, hist_source)
-
-        long_count = sr_l + mom_l + mtf_l
-        short_count = sr_s + mom_s + mtf_s
-        long_pass = int(long_count >= 2 and long_count >= short_count)
-        short_pass = int(short_count >= 2 and short_count > long_count)
-
-        if long_pass:
-            bias, directive = "long", "大盤 Long Edge → 積極搵長倉"
-        elif short_pass:
-            bias, directive = "short", "大盤 Short Edge → 積極搵短倉"
-        else:
-            bias, directive = "neutral", "大盤無明確 Edge → 觀望或減倉"
-
         chg_txt = ""
         if quote.get("change_pct") is not None:
             chg_txt = f" {quote['change_pct']:+.2f}%"
         price_src = f"SPY ${quote['price']:.2f}{chg_txt}（{quote['session']}）"
-
-        icon = lambda ok: "✓" if ok else "—"
-        long_note = (
-            f"大盤 Long Edge {long_count}/3：S&R{icon(sr_l)} 動能{icon(mom_l)} MTF{icon(mtf_l)} "
-            f"| {price_src}"
+        return _compose_broad_market_edge(
+            d1_bars, w1, h1,
+            hist_source=hist_source,
+            price_src=price_src,
+            close=quote["price"],
+            quote=quote,
+            qqq_note=_qqq_secondary_note(),
         )
-        short_note = (
-            f"大盤 Short Edge {short_count}/3：S&R{icon(sr_s)} 動能{icon(mom_s)} MTF{icon(mtf_s)} "
-            f"| {price_src}"
-        )
-
-        return {
-            "long_pass": long_pass,
-            "short_pass": short_pass,
-            "long_note": long_note,
-            "short_note": short_note,
-            "bias": bias,
-            "directive": directive,
-            "long_count": long_count,
-            "short_count": short_count,
-            "close": quote["price"],
-            "source": f"{quote['session']}（hist:{hist_source}）",
-            "qqq_note": _qqq_secondary_note(),
-            "quote": quote,
-            "scoring_enabled": True,
-            "skipped": False,
-            "sector_peers": None,
-            "features": {
-                "sr_zone": {"long": sr_l, "short": sr_s, "long_note": sr_ln, "short_note": sr_sn},
-                "momentum": {"long": mom_l, "short": mom_s, "long_note": mom_ln, "short_note": mom_sn},
-                "mtf": {"long": mtf_l, "short": mtf_s, "long_note": mtf_ln, "short_note": mtf_sn},
-            },
-        }
     except Exception as e:
         set_bme_scoring_enabled(False)
         return _broad_market_fail(f"大盤分析失敗: {e}", skipped=True)
+
+
+def assess_broad_market_edge_as_of(as_of: date) -> dict:
+    """BME at historical date — SPY close on as_of (backtest; no live quote)."""
+    set_bme_scoring_enabled(True)
+    try:
+        d1_bars = yf_fetch_bars("SPY", "1d", as_of=as_of, min_bars=TF_MIN_BARS["D1"])
+        if not d1_bars:
+            set_bme_scoring_enabled(False)
+            return _broad_market_fail(f"SPY D1 不足 @ {as_of}", skipped=True)
+        w1_bars = yf_fetch_bars("SPY", "1wk", as_of=as_of, min_bars=TF_MIN_BARS["W1"])
+        h1_bars = yf_fetch_bars("SPY", "60m", as_of=as_of, min_bars=TF_MIN_BARS["H1"])
+        w1 = analyze_bars(w1_bars) if w1_bars else None
+        h1 = analyze_bars(h1_bars) if h1_bars else None
+        close = float(d1_bars[-1]["close"])
+        price_src = f"SPY ${close:.2f}（{as_of} 收市）"
+        hist_source = f"backtest {as_of}"
+        return _compose_broad_market_edge(
+            d1_bars, w1, h1,
+            hist_source=hist_source,
+            price_src=price_src,
+            close=close,
+            as_of=as_of,
+        )
+    except Exception as e:
+        set_bme_scoring_enabled(False)
+        return _broad_market_fail(f"大盤回測失敗: {e}", skipped=True)
 
 
 def _qqq_secondary_note() -> str:
@@ -5971,9 +6243,11 @@ def score_from_bars(
     sector: str | None = None,
     batch_sector_peers: dict[str, dict] | None = None,
     defer_sector_peers: bool = False,
+    as_of_date: date | None = None,
 ) -> dict:
     """Single scoring path for CSV and yfinance — same report structure."""
     sym = symbol.upper()
+    historical = as_of_date is not None
     bars = d1_bars
     d1 = analyze_bars(bars)
 
@@ -6010,11 +6284,11 @@ def score_from_bars(
             board_long_note = f"{board_long_note}{skip_tag}"
             board_short_note = f"{board_short_note}{skip_tag}"
 
-    sym_quote = yf_live_quote(sym)
+    sym_quote = None if historical else yf_live_quote(sym)
     day_change_pct = sym_quote.get("change_pct") if sym_quote else None
 
     sector_peer = {"direction": "無數據", "note": "", "sector": sector or ""}
-    if not defer_sector_peers:
+    if not defer_sector_peers and not historical:
         sector_peer = assess_sector_peer_direction(
             sym, sector=sector, batch_peers=batch_sector_peers,
         )
@@ -6024,7 +6298,7 @@ def score_from_bars(
         board_long_note = f"{board_long_note} | {sector_peer['note']}"
         board_short_note = f"{board_short_note} | {sector_peer['note']}"
 
-    sector_footnote = fetch_sector_footnote(sym)
+    sector_footnote = "" if historical else fetch_sector_footnote(sym)
     plan = build_rr_plan(d1, bars)
     channel_ref = compute_w1_channel_reference(w1_bars) if w1_bars else None
 
@@ -6131,6 +6405,7 @@ def score_from_bars(
         "long_edge_count": scenarios["current_long"],
         "short_edge_count": scenarios["current_short"],
         "source": source,
+        "as_of_date": as_of_date.isoformat() if as_of_date else None,
     }
     data["summary_zh"] = build_summary_text(data)
     return data
@@ -7006,8 +7281,18 @@ def format_md(data: dict) -> str:
         "",
     ]
     src = data.get("source") or ""
-    if src:
-        src_zh = "TradingView CSV" if src == "CSV" else ("yfinance 自動拉數" if src == "yfinance" else src)
+    if data.get("as_of_date"):
+        lines += [
+            f"> **回測 as-of**：`{data['as_of_date']}` — 只用該日及之前 K 線；"
+            "目標係 **入場日前一日** 已出信號（過咗突破日先提示 = 太遲）。",
+            "",
+        ]
+    elif src:
+        src_zh = "TradingView CSV" if src == "CSV" else (
+            "yfinance 回測" if src == "backtest" else (
+                "yfinance 自動拉數" if src == "yfinance" else src
+            )
+        )
         lines += [f"> 數據來源：**{src_zh}** — Cloud 用 yfinance；本機 TV CSV 最準。", ""]
 
     tfs = data.get("timeframes") or {}
@@ -7178,6 +7463,30 @@ def format_batch_summary(results: list[dict]) -> str:
                 f"（現況 {edge_score_fmt(r['total_score'])}）"
             )
     return "\n".join(lines)
+
+
+def run_backtest(symbol: str, as_of: date) -> dict | None:
+    """
+    Score symbol as if today were as_of (W1/D1/H1 truncated; SPY BME historical).
+    For fine-tuning: compare score vs known good entries (e.g. MU 2024-04-22).
+    """
+    sym = symbol.upper()
+    d1_bars = yf_fetch_bars(sym, "1d", as_of=as_of, min_bars=TF_MIN_BARS["D1"])
+    if not d1_bars:
+        return None
+    w1_bars = yf_fetch_bars(sym, "1wk", as_of=as_of, min_bars=TF_MIN_BARS["W1"])
+    h1_bars = yf_fetch_bars(sym, "60m", as_of=as_of, min_bars=TF_MIN_BARS["H1"])
+    market = assess_broad_market_edge_as_of(as_of)
+    return score_from_bars(
+        sym,
+        d1_bars,
+        w1_bars=w1_bars,
+        h1_bars=h1_bars,
+        market_edge=market,
+        source="backtest",
+        as_of_date=as_of,
+        defer_sector_peers=True,
+    )
 
 
 def run_one(
