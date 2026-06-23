@@ -1,0 +1,10 @@
+﻿python : Traceback (most recent call last):
+位於 C:\Users\kinao\AppData\Local\Temp\ps-script-3f0239e4-cd6a-43f8-8785-c0901ba193c9.ps1:116 字元:1
++ python -c "
++ ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<string>", line 6, in <module>
+UnicodeEncodeError: 'cp950' codec can't encode character '\u2705' in position 0: illegal multibyte sequence
+pass True strong False path 

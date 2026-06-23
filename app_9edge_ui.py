@@ -22,6 +22,7 @@ from edge_common import (
     run_analyze_from_yfinance,
     run_backtest_from_yfinance,
     save_csv_uploads,
+    short_symbol,
 )
 
 _SCREENER: object | None = None
@@ -250,7 +251,7 @@ def render_tv_watchlist_import(
         st.caption("⚠️ CDP 未連線 — 可用「下載 .txt」去 TV Watchlist → ⋯ → Import list")
 
 
-def render_screener_results(result) -> None:
+def render_screener_results(result, *, key_prefix: str = "screener_result") -> None:
     """Show A/B/AB counts, output paths, downloads (after screener run)."""
     st.success(
         f"✅ 完成 — 分析 {result.analyzed}/{result.total_symbols} 隻"
@@ -285,12 +286,12 @@ def render_screener_results(result) -> None:
             data=result.summary_md,
             file_name=result.summary_path.name if result.summary_path else "screener_summary.md",
             mime="text/markdown",
-            key="screener_dl_summary",
+            key=f"{key_prefix}_dl_summary",
         )
 
     st.divider()
     render_tv_watchlist_import(
-        key_prefix="screener_result",
+        key_prefix=f"{key_prefix}_tv",
         default_export_dir=result.export_dir,
     )
 
@@ -499,30 +500,55 @@ def _report_entry_index(lib: list[dict], entry_id: str | None) -> int:
     return 0
 
 
+def _report_file_path(entry: dict | None) -> Path | None:
+    if entry and entry.get("path"):
+        p = Path(entry["path"])
+        if p.is_file():
+            return p
+    path_str = st.session_state.get("view_report_path", "")
+    if path_str:
+        p = Path(path_str)
+        if p.is_file():
+            return p
+    return None
+
+
 def _render_report_body(report: str, title: str, entry: dict | None = None) -> None:
     st.markdown(f'<div id="nine-edge-report"></div>', unsafe_allow_html=True)
     dl_name = "9edge_report.md"
+    report_path: Path | None = None
     if entry:
         sym = entry.get("symbol") or ""
         if sym:
             dl_name = f"{sym}_9edge.md"
-        if entry.get("path"):
-            p = Path(entry["path"])
-            if p.exists():
-                st.caption(f"{p.name} · {entry.get('ts', '')[:19]}")
-                dl_name = p.name
+        report_path = _report_file_path(entry)
+        if report_path:
+            st.caption(f"{report_path.name} · {entry.get('ts', '')[:19]}")
+            dl_name = report_path.name
     elif path_str := st.session_state.get("view_report_path", ""):
         p = Path(path_str)
         if p.exists():
+            report_path = p
             st.caption(f"{p.name} · 更新 {report_mtime_label(p)}")
             dl_name = p.name
-    st.download_button(
-        "⬇️ 下載報告 (.md)",
-        data=report,
-        file_name=dl_name,
-        mime="text/markdown",
-        key=_widget_key("download_report", entry.get("id") if entry else None),
-    )
+
+    btn_key = _widget_key("report_action", entry.get("id") if entry else None)
+    if not detect_cloud_mode() and report_path and report_path.parent.is_dir():
+        st.caption(f"`{report_path}`")
+        if st.button("📂 開報告資料夾", key=btn_key, use_container_width=False):
+            ok, msg = open_path_in_explorer(report_path.parent)
+            if ok:
+                st.toast(msg, icon="📂")
+            else:
+                st.session_state["last_error"] = msg
+    else:
+        st.download_button(
+            "⬇️ 下載報告 (.md)",
+            data=report,
+            file_name=dl_name,
+            mime="text/markdown",
+            key=btn_key,
+        )
     st.markdown(report, unsafe_allow_html=True)
 
 
@@ -811,19 +837,50 @@ def run_backtest_scan(
     st.toast(f"掃描完成：{len(rows)} 日", icon="📊")
 
 
-def render_backtest_panel(default_sym: str = "", *, key_prefix: str = "bt") -> str:
-    """回測單日 + 日期區間掃描。Returns current symbol text."""
+def resolve_backtest_symbol(
+    typed: str,
+    *,
+    tv_sym: str = "",
+    fallback: str = "",
+) -> str:
+    """留空 → TV chart；再 fallback sidebar/CSV 代號。"""
+    s = short_symbol(typed)
+    if s:
+        return s
+    tv = short_symbol(tv_sym)
+    if tv:
+        return tv
+    return short_symbol(fallback)
+
+
+def render_backtest_panel(
+    *,
+    fallback_sym: str = "",
+    tv_sym: str = "",
+    key_prefix: str = "bt",
+) -> str:
+    """回測單日 + 日期區間掃描。Returns typed symbol (may be empty)."""
+    tv_label = short_symbol(tv_sym)
     st.markdown("**📅 回測（as-of）**")
     st.caption(
         "只用該日及之前 K 線；**入場日前一日** 出信號（例：4/22 入場 → 回測 4/21）。"
-        " 即時分析唔勾回測。"
+        " 代號**留空** = 用 TV chart 而家睇緊嗰隻。"
     )
+    if tv_label:
+        st.caption(f"📺 TV chart：**{tv_label}**")
     sym = st.text_input(
         "股票代號",
-        value=default_sym,
-        placeholder="MU、NVDA、WOLF…",
+        value="",
+        placeholder=(
+            f"留空 → TV（{tv_label}）"
+            if tv_label
+            else (f"留空 → {fallback_sym}" if fallback_sym else "MU、NVDA、WOLF…")
+        ),
         key=f"{key_prefix}_symbol",
     ).strip().upper()
+
+    def _eff() -> str:
+        return resolve_backtest_symbol(sym, tv_sym=tv_sym, fallback=fallback_sym)
 
     use_bt = st.checkbox("回測模式（指定 as-of 日期）", key=f"{key_prefix}_use_backtest")
     as_of: date | None = None
@@ -836,7 +893,11 @@ def render_backtest_panel(default_sym: str = "", *, key_prefix: str = "bt") -> s
         )
 
     if st.button("🔍 分析", type="primary", use_container_width=True, key=f"{key_prefix}_analyze"):
-        run_yfinance_analysis(sym or default_sym, as_of=as_of if use_bt else None)
+        eff = _eff()
+        if not eff:
+            st.session_state["last_error"] = "請輸入代號，或連接 TV（CDP 9222）"
+            return
+        run_yfinance_analysis(eff, as_of=as_of if use_bt else None)
 
     with st.expander("📊 日期區間掃描（搵 Grade A/B）", expanded=False):
         st.caption("由結束日向前掃到開始日；慢（每日約 1–2 秒），請耐心等。")
@@ -862,10 +923,14 @@ def render_backtest_panel(default_sym: str = "", *, key_prefix: str = "bt") -> s
             key=f"{key_prefix}_scan_grades",
         )
         if st.button("開始掃描", use_container_width=True, key=f"{key_prefix}_scan_run"):
-            run_backtest_scan(sym or default_sym, scan_start, scan_end, grade_mode=grade_mode, key_prefix=key_prefix)
+            eff = _eff()
+            if not eff:
+                st.session_state["last_error"] = "請輸入代號，或連接 TV（CDP 9222）"
+            else:
+                run_backtest_scan(eff, scan_start, scan_end, grade_mode=grade_mode, key_prefix=key_prefix)
 
         rows = st.session_state.get(f"{key_prefix}_backtest_scan_rows") or []
-        scan_sym = st.session_state.get(f"{key_prefix}_backtest_scan_sym") or sym
+        scan_sym = st.session_state.get(f"{key_prefix}_backtest_scan_sym") or _eff()
         if rows:
             st.caption(f"**{scan_sym}** · {len(rows)} 日符合 · 新→舊")
             table = [
@@ -939,7 +1004,7 @@ def render_status_row(connected: bool, chart_sym: str, chart_tf: str) -> None:
 
 
 def render_cloud_toolbar(default_sym: str = "") -> None:
-    render_backtest_panel(default_sym, key_prefix="cloud_bt")
+    render_backtest_panel(fallback_sym=default_sym, key_prefix="cloud_bt")
 
 
 def render_cloud_sidebar() -> None:
@@ -1090,6 +1155,7 @@ def render_sidebar_controls(cloud_mode: bool, symbol_override: str | None) -> tu
 
 def render_local_toolbar(
     connected: bool,
+    chart_sym: str,
     symbol_override: str | None,
     csv_sym: str,
     uploaded_csvs,
@@ -1099,7 +1165,8 @@ def render_local_toolbar(
 ) -> None:
     st.subheader("📅 回測 · yfinance")
     render_backtest_panel(
-        (symbol_override or csv_sym or "").upper(),
+        fallback_sym=(symbol_override or csv_sym or "").upper(),
+        tv_sym=chart_sym if connected else "",
         key_prefix=f"{key_prefix}_backtest",
     )
     st.divider()
@@ -1246,10 +1313,10 @@ def render_local_toolbar(
     if prev := st.session_state.get("last_screener_result"):
         if isinstance(prev, _screener().ScreenerRunResult) and prev.ok:
             with st.expander("📊 上次 Screener 結果", expanded=True):
-                render_screener_results(prev)
+                render_screener_results(prev, key_prefix=f"{key_prefix}_screener")
     elif _screener().list_tv_export_dirs():
         with st.expander("📥 TV Watchlist 匯入（已有匯出）", expanded=False):
-            render_tv_watchlist_import(key_prefix="tv_import_tool")
+            render_tv_watchlist_import(key_prefix=f"{key_prefix}_tv_import")
 
     st.divider()
     st.subheader("💰 RRR · 風險回報計算")
@@ -1295,6 +1362,7 @@ def render_local_toolbar(
 
 def render_tools_expander(
     connected: bool,
+    chart_sym: str,
     symbol_override: str | None,
     csv_sym: str,
     uploaded_csvs,
@@ -1306,6 +1374,7 @@ def render_tools_expander(
     with st.expander("🛠️ 工具", expanded=expanded, key=key):
         render_local_toolbar(
             connected,
+            chart_sym,
             symbol_override,
             csv_sym,
             uploaded_csvs,
@@ -1349,6 +1418,7 @@ def main_local(
     has_report = st.session_state.get("view_report") or st.session_state.get("report_library")
     render_tools_expander(
         connected,
+        chart_sym,
         symbol_override,
         csv_sym,
         uploaded_csvs,
@@ -1361,6 +1431,7 @@ def main_local(
 
     render_tools_expander(
         connected,
+        chart_sym,
         symbol_override,
         csv_sym,
         uploaded_csvs,

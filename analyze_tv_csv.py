@@ -70,6 +70,12 @@ TF_ORDER = ("W1", "D1", "H1")
 TF_MIN_BARS = {"W1": 20, "D1": 30, "H1": 20}
 TF_PRIORITY = {"W1": 0, "D1": 1, "H1": 2}
 SWING_STOP_TFS = frozenset({"W1", "D1"})
+# Swing 暫時只計 W1+D1（H1 數據/對齊唔穩定）
+H1_SCORING_ENABLED = False
+
+
+def active_tf_order() -> tuple[str, ...]:
+    return TF_ORDER if H1_SCORING_ENABLED else ("W1", "D1")
 
 SECTOR_ETF = {
     "technology": "XLK",
@@ -910,18 +916,33 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     """
     closes = [b["close"] for b in bars]
     c = closes[-1]
-    s5 = sma(closes, 5)
     s10 = sma(closes, 10)
     s20 = sma(closes, 20)
+    s50 = sma(closes, 50)
+    s200 = sma(closes, 200) if len(closes) >= 200 else []
     e20 = ema(closes, 20)
+    e50 = ema(closes, 50)
+    has_200 = len(s200) >= 200
 
-    # --- 4) MA 同向 (5/10/20，以 20MA 為界) ---
-    ma_bull_aligned = s5[-1] > s10[-1] > s20[-1]
-    ma_bear_aligned = s5[-1] < s10[-1] < s20[-1]
+    def _ma_rising(series: list[float], lookback: int = 6) -> bool:
+        return len(series) > lookback and series[-1] > series[-lookback]
+
+    # --- ① 均線向上：10/20/50 斜向上就得（唔要完整排列、唔用 5MA）---
+    ma_up_10 = _ma_rising(s10)
+    ma_up_20 = _ma_rising(s20)
+    ma_up_50 = _ma_rising(s50, 8)
+    ma_up_e20 = _ma_rising(e20)
+    ma_up_200 = has_200 and _ma_rising(s200, 10)
+    ma_pointing_up = ma_up_10 and ma_up_20 and ma_up_50
+    ma_pointing_down = (
+        len(s10) > 6 and s10[-1] < s10[-6]
+        and len(s20) > 6 and s20[-1] < s20[-6]
+        and len(s50) > 8 and s50[-1] < s50[-8]
+    )
+    stack_ok = s10[-1] > s20[-1] > s50[-1]
     ma20_slope_up = s20[-1] > s20[-6]
     ma20_slope_down = s20[-1] < s20[-6]
-    ma_turn_up = detect_ma_inflection_up(s5, s10, s20)
-    ma_bull_ok = (ma_bull_aligned and ma20_slope_up) or ma_turn_up
+    ma_turn_up, ma_turn_detail = detect_ma_inflection_up(s10, s20, s50, e20, c)
     n = len(bars)
     closes_below_s20 = sum(
         1 for i, b in enumerate(bars[-10:])
@@ -977,7 +998,7 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
 
     # --- 升勢動能綜合 (long system) ---
     bull_checks = {
-        "ma_aligned": ma_bull_ok,
+        "ma_aligned": ma_pointing_up,
         "ma20_respect": ma20_respect_up and c > s20[-1],
         "wave_structure": hh_hl or momentum_break_up,
         "big_candles": frequent_big,
@@ -986,7 +1007,7 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     bull_score = sum(bull_checks.values())
 
     bear_checks = {
-        "ma_aligned": ma_bear_aligned and ma20_slope_down,
+        "ma_aligned": ma_pointing_down,
         "ma20_respect": ma20_respect_down and c < s20[-1],
         "wave_structure": ll_lh or momentum_break_down,
         "big_candles": frequent_big,
@@ -994,25 +1015,102 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
     }
     bear_score = sum(bear_checks.values())
 
-    momentum_pass = (
-        bull_score >= 4 and bull_checks["ma_aligned"] and bull_checks["large_volume"]
-    ) or (
-        ma_turn_up
-        and bull_checks["large_volume"]
+    core_pass = (
+        bull_checks["ma_aligned"]
         and bull_checks["wave_structure"]
-        and bull_checks["ma20_respect"]
-        and bull_score >= 3
+        and bull_checks["large_volume"]
     )
+    momentum_strong = all(bull_checks.values())
+    momentum_pass = core_pass
+    pass_path: str | None = None
+    pass_path_note = ""
+    if momentum_strong:
+        pass_path = "✅+"
+        pass_path_note = "五子項全過（①②③④⑤）— 強勢動能"
+    elif core_pass:
+        pass_path = "✅"
+        pass_path_note = "核心過關（①③⑤）— 均線向上 + 浪型/突破 + 放量"
+    breakout_launch = momentum_break_up and bull_checks["large_volume"] and ma_pointing_up
     bear_pass = bear_score >= 4 and bear_checks["ma_aligned"] and bear_checks["large_volume"]
     trend_dir = "升勢" if bull_score >= bear_score else "跌勢"
 
-    notes = []
-    if ma_turn_up and not (ma_bull_aligned and ma20_slope_up):
-        notes.append(f"MA轉向上(10MA {s10[-15]:.2f}→{s10[-1]:.2f})" if len(s10) > 15 else "MA轉向上")
-    elif bull_checks["ma_aligned"]:
-        notes.append(f"5/10/20MA 同向向上({s5[-1]:.2f}/{s10[-1]:.2f}/{s20[-1]:.2f})")
+    if ma_pointing_up:
+        bits = ["10MA↑", "20MA↑", "50MA↑"]
+        if ma_up_e20:
+            bits.append("EMA20↑")
+        if ma_up_200:
+            bits.append("200MA↑")
+        ma_check_note = f"{' '.join(bits)}（{s10[-1]:.2f}/{s20[-1]:.2f}/{s50[-1]:.2f}）"
     else:
-        notes.append("均線未完全同向")
+        miss = []
+        if not ma_up_10:
+            miss.append("10MA 未向上")
+        if not ma_up_20:
+            miss.append("20MA 未向上")
+        if not ma_up_50:
+            miss.append("50MA 未向上")
+        ma_check_note = "；".join(miss) if miss else "均線未向上"
+
+    wave_note = (
+        "一浪高於一浪"
+        if hh_hl
+        else (f"強 K 升破前浪頂 ${prior_top:.2f}" if momentum_break_up else "未見明確升浪")
+    )
+    vol_note = (
+        f"放量 {vol_ratio:.1f}x 均量"
+        if large_volume
+        else (
+            pullback_vol["note"]
+            if pullback_vol["pass"]
+            else (
+                f"近段升量>跌量（{r_up / max(r_down, 1):.2f}x）"
+                if ma_turn_up and near_wave_top and accumulation
+                else "成交量未配合"
+            )
+        )
+    )
+    check_rows = [
+        {
+            "key": "ma_aligned",
+            "label": "① 均線向上",
+            "pass": bull_checks["ma_aligned"],
+            "note": ma_check_note,
+        },
+        {
+            "key": "ma20_respect",
+            "label": "② 20MA 界線",
+            "pass": bull_checks["ma20_respect"],
+            "note": (
+                f"近 10 日 {closes_below_s20} 次跌穿 20MA，現價在 20MA 上"
+                if bull_checks["ma20_respect"]
+                else f"近 10 日 {closes_below_s20} 次跌穿 20MA（要 ≤1）"
+            ),
+        },
+        {
+            "key": "wave_structure",
+            "label": "③ 浪型/突破",
+            "pass": bull_checks["wave_structure"],
+            "note": wave_note,
+        },
+        {
+            "key": "big_candles",
+            "label": "④ 大 K 頻繁",
+            "pass": bull_checks["big_candles"],
+            "note": f"近 10 日 {big_count}/10 根大 K（要 ≥3）",
+        },
+        {
+            "key": "large_volume",
+            "label": "⑤ 大成交量",
+            "pass": bull_checks["large_volume"],
+            "note": vol_note,
+        },
+    ]
+
+    notes = []
+    if bull_checks["ma_aligned"]:
+        notes.append(ma_check_note)
+    else:
+        notes.append("均線未向上")
     if bull_checks["wave_structure"]:
         notes.append("一浪高於一浪" if hh_hl else f"升破前浪頂{prior_top:.2f}")
     else:
@@ -1021,7 +1119,7 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         notes.append("少跌穿20MA")
     if frequent_big:
         notes.append(f"大K線頻繁({big_count}/10)")
-    if large_volume:
+    if bull_checks["large_volume"]:
         notes.append(f"大成交量({vol_ratio:.1f}x均量)")
     elif pullback_vol["pass"]:
         notes.append(pullback_vol["note"])
@@ -1029,22 +1127,33 @@ def analyze_momentum_trend(bars: list[dict]) -> dict:
         notes.append(f"近段升量>跌量（{r_up / max(r_down, 1):.2f}x）")
     else:
         notes.append("成交量未配合")
+    if pass_path_note:
+        notes.append(pass_path_note)
 
     return {
         "pass": momentum_pass,
+        "pass_strong": momentum_strong,
         "bear_pass": bear_pass,
-        "note": "；".join(notes),
+        "note": ("✅+ " if momentum_strong else ("✅ " if momentum_pass else "")) + "；".join(notes),
         "bear_note": f"跌勢{bear_score}/5" + ("✓" if bear_pass else ""),
         "trend_dir": trend_dir,
         "bull_score": bull_score,
         "bear_score": bear_score,
-        "sma5": round(s5[-1], 2),
+        "bull_checks": bull_checks,
+        "check_rows": check_rows,
+        "pass_path": pass_path,
+        "pass_path_note": pass_path_note,
         "sma10": round(s10[-1], 2),
         "sma20": round(s20[-1], 2),
+        "sma50": round(s50[-1], 2),
+        "sma200": round(s200[-1], 2) if has_200 else None,
         "ema20": round(e20[-1], 2),
+        "ema50": round(e50[-1], 2),
         "prior_wave_top": round(prior_top, 2),
         "prior_wave_bottom": round(prior_bot, 2),
         "ma_turn_up": ma_turn_up,
+        "ma_turn_detail": ma_turn_detail,
+        "breakout_launch": breakout_launch,
         "pullback_volume": pullback_vol,
     }
 
@@ -1651,25 +1760,49 @@ def at_key_resistance(bar: dict, sr: dict, mom: dict, tol: float = 0.035) -> boo
 
 
 def detect_ma_inflection_up(
-    s5: list[float],
     s10: list[float],
     s20: list[float],
+    s50: list[float],
+    e20: list[float],
+    close: float,
     *,
     lookback: int = 15,
-) -> bool:
+) -> tuple[bool, str]:
     """
-    MA 由平/向下轉向上（例：2月橫行/跌，4/16 起 10MA 再向上）。
-    唔使等完整 5>10>20 維持幾星期。
+    10MA 由平/向下轉向上（搵剛轉好 — 唔使等完整 10>20>50）。
+    返回 (是否觸發, 報告用細節)。
     """
-    if len(s10) < lookback + 5 or len(s20) < 8:
-        return False
+    if len(s10) < lookback + 5 or len(s20) < 8 or len(s50) < 8:
+        return False, "K 線不足"
+
     s10_early = s10[-lookback]
     s10_mid = s10[-lookback // 2]
     was_flat_or_down = s10_mid <= s10_early * 1.008
     now_rising = s10[-1] > s10[-4] and s10[-4] >= s10[-7] * 0.998
     s20_turning = s20[-1] > s20[-6]
-    stacking = s5[-1] > s10[-1] and s10[-1] >= s20[-1] * 0.992
-    return was_flat_or_down and now_rising and s20_turning and stacking
+    s50_turning = s50[-1] > s50[-8]
+    stacking = s10[-1] >= s20[-1] * 0.992 and s20[-1] >= s50[-1] * 0.985
+    price_ok = close > e20[-1] and close > s50[-1]
+
+    if was_flat_or_down and now_rising and s20_turning and stacking and price_ok:
+        detail = (
+            f"10MA {s10[-15]:.2f}→{s10[-1]:.2f}；"
+            f"20MA 轉上；{'50MA 轉上' if s50_turning else '50MA 追趕中'}"
+        )
+        return True, detail
+
+    gaps = []
+    if not was_flat_or_down:
+        gaps.append("10MA 未見平/向下")
+    if not now_rising:
+        gaps.append("10MA 未連續向上")
+    if not s20_turning:
+        gaps.append("20MA 未轉上")
+    if not stacking:
+        gaps.append("10/20/50 未貼近排列")
+    if not price_ok:
+        gaps.append("收市未企穩 EMA20/50MA 上")
+    return False, "；".join(gaps) if gaps else "條件未齊"
 
 
 def assess_pullback_volume_profile(
@@ -2871,12 +3004,15 @@ def analyze_bars(bars: list[dict]) -> dict:
         "avg_volume_20": int(avg20),
         "ema20": mom["ema20"],
         "ema50": round(e50[-1], 2),
-        "sma5": mom["sma5"],
         "sma10": mom["sma10"],
         "sma20": mom["sma20"],
+        "sma50": mom.get("sma50"),
+        "sma200": mom.get("sma200"),
         "momentum_pass": momentum_pass,
         "momentum_note": mom["note"],
+        "momentum_detail": mom,
         "momentum_bear_pass": mom["bear_pass"],
+        "momentum_bear_note": mom["bear_note"],
         "trend_dir": mom["trend_dir"],
         "sr_pass": sr_pass,
         "sr_note": sr_note,
@@ -6042,13 +6178,18 @@ def analyze_mtf_cross(
     w1: dict | None,
     d1: dict,
     h1: dict | None,
+    *,
+    use_h1: bool | None = None,
 ) -> tuple[int, int, str]:
     """
     Edge #4 MTF across W1 (HTF) -> D1 (mid) -> H1 (LTF).
-    Valid stack: W1~D1~5x, D1~H1~6.5x (>=4x apart).
-    Long: HTF trend supports D1 setup; H1 pullback in uptrend counts as entry timing.
-    Short: mirror.
+    H1_SCORING_ENABLED=False 時只計 W1->D1。
     """
+    if use_h1 is None:
+        use_h1 = H1_SCORING_ENABLED
+    if not use_h1:
+        h1 = None
+
     w_dir = tf_direction(w1) if w1 else "neutral"
     d_dir = tf_direction(d1)
     h_dir = tf_direction(h1) if h1 else "neutral"
@@ -6083,7 +6224,6 @@ def analyze_mtf_cross(
             return True
         if h_dir == "neutral":
             return d_dir != "short"
-        # LTF bearish pullback while HTF/mid uptrend = valid entry technique
         return d_dir == "long" and w_dir in ("long", "neutral")
 
     def ltf_short_ok() -> bool:
@@ -6094,6 +6234,25 @@ def analyze_mtf_cross(
         if h_dir == "neutral":
             return d_dir != "long"
         return d_dir == "short" and w_dir in ("short", "neutral")
+
+    if not use_h1:
+        mtf_long = 1 if (
+            w1 is not None
+            and d1_long_setup
+            and htf_allows_long()
+            and w_dir in ("long", "neutral")
+            and d_dir in ("long", "neutral")
+        ) else 0
+        mtf_short = 1 if (
+            w1 is not None
+            and d1_short_setup
+            and htf_allows_short()
+            and w_dir in ("short", "neutral")
+            and d_dir in ("short", "neutral")
+        ) else 0
+        align = "Long 對齊" if mtf_long else ("Short 對齊" if mtf_short else "未對齊")
+        note = f"W1->D1 {align}（H1 暫不計）：W1={w_dir} | D1={d_dir}"
+        return mtf_long, mtf_short, note
 
     mtf_long = 1 if (
         w1 is not None and h1 is not None
@@ -6200,9 +6359,10 @@ def build_per_tf_block(
         "metrics": {
             "ema20": analysis["ema20"],
             "ema50": analysis["ema50"],
-            "sma5": analysis.get("sma5"),
             "sma10": analysis.get("sma10"),
             "sma20": analysis.get("sma20"),
+            "sma50": analysis.get("sma50"),
+            "sma200": analysis.get("sma200"),
             "trend_dir": analysis.get("trend_dir", "—"),
             "swing_low": analysis["swing_low"],
             "resistance": analysis["resistance"],
@@ -6251,6 +6411,8 @@ def score_from_bars(
     bars = d1_bars
     d1 = analyze_bars(bars)
 
+    if not H1_SCORING_ENABLED:
+        h1_bars = None
     w1 = analyze_bars(w1_bars) if w1_bars else None
     h1 = analyze_bars(h1_bars) if h1_bars else None
     d1 = merge_swing_sr(d1, bars, w1=w1, w1_bars=w1_bars, h1=h1, h1_bars=h1_bars)
@@ -6320,7 +6482,7 @@ def score_from_bars(
     for tf_label, analysis, tf_bars in (
         ("W1", w1, w1_bars),
         ("D1", d1, bars),
-        ("H1", h1, h1_bars),
+        ("H1", h1, h1_bars if H1_SCORING_ENABLED else None),
     ):
         if analysis is None or tf_bars is None:
             continue
@@ -6349,9 +6511,9 @@ def score_from_bars(
         mi_canonical, w1=w1, h1=h1,
     )
 
-    present = [t for t in TF_ORDER if t in tf_blocks]
-    if present == list(TF_ORDER):
-        tf_label = "W1+D1+H1"
+    present = [t for t in active_tf_order() if t in tf_blocks]
+    if present == list(active_tf_order()):
+        tf_label = "+".join(active_tf_order())
     elif present:
         tf_label = "+".join(present)
     else:
@@ -6381,6 +6543,7 @@ def score_from_bars(
             "note": mtf_note,
         },
         "rs_detail": rs,
+        "momentum_detail": d1.get("momentum_detail"),
         "market_edge_detail": market,
         "sector_footnote": sector_footnote,
         "sector_peer_direction": sector_peer,
@@ -6685,7 +6848,7 @@ def build_summary_text(data: dict) -> str:
         )
         tfs = data.get("timeframes") or {}
         if tfs:
-            tf_bits = [f"{tf} L{tfs[tf]['long_count']}/S{tfs[tf]['short_count']}" for tf in TF_ORDER if tf in tfs]
+            tf_bits = [f"{tf} L{tfs[tf]['long_count']}/S{tfs[tf]['short_count']}" for tf in active_tf_order() if tf in tfs]
             if tf_bits:
                 parts.append(f"分週期：{' | '.join(tf_bits)}。")
         best = sc.get("best_long")
@@ -6761,7 +6924,7 @@ def _edge_overview_table_rows(timeframes: dict[str, dict]) -> list[str]:
         f"| TF | Long | Short | 收市 | {cols} |",
         f"|----|:----:|:-----:|-----:|{'|:---:|' * len(EDGE_OVERVIEW_KEYS)}",
     ]
-    for tf in TF_ORDER:
+    for tf in active_tf_order():
         block = timeframes.get(tf)
         if not block:
             dash = " | ".join(["—"] * len(EDGE_OVERVIEW_KEYS))
@@ -6783,7 +6946,7 @@ def _edge_overview_html_table(title: str, timeframes: dict[str, dict]) -> str:
         for i, h in enumerate(headers)
     )
     body_rows: list[str] = []
-    for tf in TF_ORDER:
+    for tf in active_tf_order():
         block = timeframes.get(tf)
         if not block:
             cells = ["—"] * (4 + len(EDGE_OVERVIEW_KEYS))
@@ -6831,9 +6994,10 @@ def format_combined_edge_dashboard(
             blocks.append(_edge_overview_html_table(f"{label} @ ${entry}", overview))
     html = "".join(blocks)
     return [
-        "## 多週期 Edge 總覽（W1 / D1 / H1 分開計）",
+        "## 多週期 Edge 總覽（W1 / D1 分開計）",
         "",
-        "> 整體 Grade 以 **D1** 為主；Multi-Timeframe 為 W1→D1→H1 對齊；Relative Strength / Broad Market 為 symbol / SPY 級。",
+        "> 整體 Grade 以 **D1** 為主；Multi-Timeframe 為 W1→D1 對齊（**H1 暫不計**）；"
+        "Relative Strength / Broad Market 為 symbol / SPY 級。",
         "",
         html,
         "",
@@ -6849,7 +7013,7 @@ def format_tf_overview_table(timeframes: dict[str, dict]) -> list[str]:
         "| TF | Long | Short | 收市 | 趨勢 | S&R | CSR | MTF | F.T. | M.I. |",
         "|----|:----:|:-----:|-----:|:----:|:---:|:---:|:---:|:----:|:----:|",
     ]
-    for tf in TF_ORDER:
+    for tf in active_tf_order():
         block = timeframes.get(tf)
         if not block:
             lines.append(f"| {tf} | — | — | — | — | — | — | — | — | — |")
@@ -6895,16 +7059,74 @@ def format_tf_detail_section(tf: str, block: dict) -> list[str]:
     return lines
 
 
+def format_momentum_section(mom: dict) -> list[str]:
+    if not mom:
+        return []
+    icon = lambda ok: "✅" if ok else "❌"
+    long_ok = mom.get("pass")
+    strong = mom.get("pass_strong")
+    rows = mom.get("check_rows") or []
+    s200 = mom.get("sma200")
+    ma_line = (
+        f"{mom.get('sma10', '—')} / {mom.get('sma20', '—')} / "
+        f"EMA{mom.get('ema20', '—')} / {mom.get('sma50', '—')} / "
+        f"{s200 if s200 is not None else '—'}"
+    )
+    if strong:
+        status = "✅+ 強勢通過"
+    elif long_ok:
+        status = "✅ 通過"
+    else:
+        status = "❌ 未過"
+    lines = [
+        "## Edge #1 — Momentum & Trend（五子項 · D1）",
+        "",
+        "> **通過規則**：**①③⑤** 過 = ✅；**②④** 都過埋 = **✅+** 強勢。",
+        "> ① 只睇 10/20/50 MA **斜向上**，唔要完整排列。",
+        "",
+        f"- **Long Momentum & Trend**：{status}（{mom.get('bull_score', 0)}/5）",
+        f"- **趨勢方向**：{mom.get('trend_dir', '—')}",
+        f"- **10MA / 20MA / EMA20 / 50MA / 200MA**：{ma_line}",
+        f"- **MA 剛轉向上（參考）**：{'✅ 觸發' if mom.get('ma_turn_up') else '❌ 未觸發'} — "
+        f"{mom.get('ma_turn_detail', '—')}",
+    ]
+    if mom.get("pass_path"):
+        lines.append(f"- **評級**：**{mom['pass_path']}** — {mom.get('pass_path_note', '')}")
+    elif not long_ok:
+        lines.append("- **評級**：—（要 ① 均線向上 + ③ 浪型/突破 + ⑤ 放量）")
+    lines += [
+        "",
+        "| 子項 | Long | 說明 |",
+        "|------|:----:|------|",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['label']} | {icon(row.get('pass'))} | {row.get('note', '—')} |"
+        )
+    lines.append("")
+    return lines
+
+
 def format_mtf_section(mtf_detail: dict) -> list[str]:
     note = mtf_detail.get("note", "")
     long_ok = mtf_detail.get("long")
     short_ok = mtf_detail.get("short")
+    title = (
+        "## Edge #4 — Multi-Timeframe（W1 → D1 → H1）"
+        if H1_SCORING_ENABLED
+        else "## Edge #4 — Multi-Timeframe（W1 → D1 · H1 暫不計）"
+    )
+    logic = (
+        "HTF（W1）趨勢支持 D1 setup；H1 可為 entry timing（LTF 回調而 HTF 仍升勢 = 精準入場）"
+        if H1_SCORING_ENABLED
+        else "HTF（W1）趨勢支持 D1 setup；H1 暫時唔計分"
+    )
     return [
-        "## Edge #4 — Multi-Timeframe（W1 → D1 → H1）",
+        title,
         "",
         f"- **Long Multi-Timeframe**：{'✅ 通過' if long_ok else '❌ 未過'}",
         f"- **Short Multi-Timeframe**：{'✅ 通過' if short_ok else '❌ 未過'}",
-        f"- **邏輯**：HTF（W1）趨勢支持 D1 setup；H1 可為 entry timing（LTF 回調而 HTF 仍升勢 = 精準入場）",
+        f"- **邏輯**：{logic}",
         f"- **備註**：{note}",
         "",
     ]
@@ -7304,6 +7526,8 @@ def format_md(data: dict) -> str:
         lines.extend(format_price_scenarios(data))
         if mtf := data.get("mtf_detail"):
             lines.extend(format_mtf_section(mtf))
+        if mom := data.get("momentum_detail"):
+            lines.extend(format_momentum_section(mom))
         if rs := data.get("rs_detail"):
             lines.extend(format_rs_section(rs))
         if market := data.get("market_edge_detail"):
@@ -7312,7 +7536,7 @@ def format_md(data: dict) -> str:
             lines.extend(format_rr_section(p))
         if ft := data.get("ft_detail"):
             lines.extend(format_ft_section(ft))
-        for tf in TF_ORDER:
+        for tf in active_tf_order():
             if tf in tfs:
                 lines.extend(format_tf_detail_section(tf, tfs[tf]))
 
@@ -7323,8 +7547,8 @@ def format_md(data: dict) -> str:
         "|------|------|",
         f"| 收市 | **${data['price']}** |",
         f"| 成交量 | {data['volume']}（均量 {data['volume_avg']}） |",
-        f"| 5MA / 10MA / 20MA | {m.get('sma5', '—')} / {m.get('sma10', '—')} / {m.get('sma20', '—')} |",
-        f"| EMA20 / EMA50 | {m.get('ema20', '—')} / {m.get('ema50', '—')} |",
+        f"| 10MA / 20MA / EMA20 | {m.get('sma10', '—')} / {m.get('sma20', '—')} / {m.get('ema20', '—')} |",
+        f"| 50MA / 200MA / EMA50 | {m.get('sma50', '—')} / {m.get('sma200', '—')} / {m.get('ema50', '—')} |",
         f"| 趨勢方向 | {m.get('trend_dir', '—')} |",
         f"| 前浪頂 / 前浪底 | ${m.get('wave_top', '—')} / ${m.get('wave_bottom', '—')} |",
         f"| 20 日低 / 60 日阻力 | ~**${m.get('swing_low', '—')}** / ~**${m.get('resistance', '—')}** |",
