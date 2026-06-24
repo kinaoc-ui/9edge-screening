@@ -526,6 +526,13 @@ def run_analyze_from_yfinance(symbol: str) -> PipelineResult:
         return result
 
 
+def run_backtest_from_yfinance(symbol: str, as_of: date) -> PipelineResult:
+    """Delegate to edge_common (keeps old app imports working on Streamlit Cloud)."""
+    from edge_common import run_backtest_from_yfinance as _bt
+
+    return _bt(symbol, as_of)
+
+
 def run_pipeline(
     symbol: str | None = None,
     *,

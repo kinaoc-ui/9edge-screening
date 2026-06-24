@@ -14,17 +14,40 @@ from pathlib import Path
 
 import streamlit as st
 
-from edge_common import (
-    csv_exists,
-    get_csv_dir,
-    is_cloud_environment,
-    list_recent_reports,
-    run_analyze_from_csv,
-    run_analyze_from_yfinance,
-    run_backtest_from_yfinance,
-    save_csv_uploads,
-    short_symbol,
-)
+# Streamlit Cloud: ensure repo root is importable; reload edge_common to avoid stale module cache.
+_APP_ROOT = Path(__file__).resolve().parent
+if str(_APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_APP_ROOT))
+
+import importlib
+
+try:
+    import edge_common as _edge_common_mod
+
+    _edge_common_mod = importlib.reload(_edge_common_mod)
+    csv_exists = _edge_common_mod.csv_exists
+    get_csv_dir = _edge_common_mod.get_csv_dir
+    is_cloud_environment = _edge_common_mod.is_cloud_environment
+    list_recent_reports = _edge_common_mod.list_recent_reports
+    run_analyze_from_csv = _edge_common_mod.run_analyze_from_csv
+    run_analyze_from_yfinance = _edge_common_mod.run_analyze_from_yfinance
+    run_backtest_from_yfinance = _edge_common_mod.run_backtest_from_yfinance
+    save_csv_uploads = _edge_common_mod.save_csv_uploads
+    short_symbol = _edge_common_mod.short_symbol
+except (ImportError, AttributeError) as _edge_imp_err:
+    import traceback
+
+    _edge_py = _APP_ROOT / "edge_common.py"
+    if not _edge_py.is_file():
+        st.error(
+            "Missing edge_common.py next to app_9edge_ui.py. "
+            "Push main (0092291+) and reboot the Streamlit app."
+        )
+    else:
+        st.error(f"Failed to import edge_common: {_edge_imp_err}")
+    st.code(traceback.format_exc())
+    st.caption(f"app_root={_APP_ROOT}")
+    st.stop()
 
 _SCREENER: object | None = None
 _FIRST_SCREEN: object | None = None
@@ -39,13 +62,14 @@ def _screener():
     return _SCREENER
 
 
-def _first_screen():
+def _first_screen(*, fresh: bool = False):
     global _FIRST_SCREEN
     import importlib
+    import first_screen as fs_mod
     if _FIRST_SCREEN is None:
-        import first_screen as _FIRST_SCREEN
-    elif not hasattr(_FIRST_SCREEN, "TfFilter"):
-        _FIRST_SCREEN = importlib.reload(_FIRST_SCREEN)
+        _FIRST_SCREEN = fs_mod
+    if fresh or not hasattr(_FIRST_SCREEN, "find_ma10_flat_start"):
+        _FIRST_SCREEN = importlib.reload(fs_mod)
     return _FIRST_SCREEN
 
 
@@ -547,6 +571,13 @@ def build_fs_filters(
     )
 
 
+def _bt_fail(msg: str) -> None:
+    """Show backtest error and refresh (Streamlit needs rerun after session_state)."""
+    st.session_state["last_error"] = msg
+    append_logs([f"ERROR: {msg}"])
+    st.rerun()
+
+
 def _fs_bt_publish_report(
     *,
     md: str,
@@ -579,16 +610,23 @@ def run_fs_single_backtest(
 ) -> None:
     sym = (sym or "").strip().upper()
     if not sym:
-        st.session_state["last_error"] = "請輸入股票代號"
-        return
+        _bt_fail("請輸入單股代號（區間掃描欄）")
+    import importlib
+    import analyze_tv_csv
+    import first_screen
     import backtest_first_screen as fsbt
+    importlib.reload(analyze_tv_csv)
+    importlib.reload(first_screen)
+    importlib.reload(fsbt)
 
-    with st.spinner(f"First Screen 回測 {sym} @ {as_of}…"):
-        try:
+    try:
+        with st.spinner(f"First Screen 回測 {sym} @ {as_of}…"):
             data, path = fsbt.run_single_backtest(sym, as_of, filters=filters)
-        except ValueError as e:
-            st.session_state["last_error"] = str(e)
-            return
+    except ValueError as e:
+        _bt_fail(str(e))
+    except Exception as e:
+        _bt_fail(f"回測失敗：{e}")
+
     md = path.read_text(encoding="utf-8")
     title = (
         f"FS {sym} @ {as_of} — "
@@ -620,12 +658,17 @@ def run_fs_backtest_scan(
 ) -> None:
     sym = (sym or "").strip().upper()
     if not sym:
-        st.session_state["last_error"] = "請輸入股票代號"
-        return
+        _bt_fail("請輸入單股代號（區間掃描欄）")
     if scan_start > scan_end:
         scan_start, scan_end = scan_end, scan_start
 
+    import importlib
+    import analyze_tv_csv
+    import first_screen
     import backtest_first_screen as fsbt
+    importlib.reload(analyze_tv_csv)
+    importlib.reload(first_screen)
+    importlib.reload(fsbt)
 
     progress = st.progress(0.0, text="準備 First Screen 掃描…")
     status = st.empty()
@@ -634,15 +677,21 @@ def run_fs_backtest_scan(
         progress.progress(done / max(total, 1), text=f"掃描 {cur.isoformat()} ({done}/{total})")
         status.caption(f"**{sym}** · {cur.isoformat()}")
 
-    pf = fsbt.pass_filter_set(pass_mode)
-    rows = fsbt.scan_backtest_range(
-        sym,
-        scan_start,
-        scan_end,
-        filters=filters,
-        pass_modes=pf,
-        progress_callback=on_progress,
-    )
+    try:
+        pf = fsbt.pass_filter_set(pass_mode)
+        rows = fsbt.scan_backtest_range(
+            sym,
+            scan_start,
+            scan_end,
+            filters=filters,
+            pass_modes=pf,
+            progress_callback=on_progress,
+        )
+    except Exception as e:
+        progress.empty()
+        status.empty()
+        _bt_fail(f"區間掃描失敗：{e}")
+
     progress.empty()
     status.empty()
     md = fsbt.format_scan_md(rows, sym, start=scan_start, end=scan_end, filters=filters)
@@ -653,12 +702,18 @@ def run_fs_backtest_scan(
     out_path = fsbt.REPORTS / f"{sym}_scan_{scan_start}_{scan_end}_backtest.md"
     title = f"FS 掃描 {sym} · {len(rows)} 日"
     if not rows:
-        st.session_state["last_error"] = (
-            f"{sym} {scan_start}→{scan_end}：0 日符合「{pass_mode}」篩選；"
-            "試放鬆條件或改「全部有分數」。"
+        flash = (
+            f"FS 區間掃描 **{sym}** {scan_start}→{scan_end}："
+            f"0 日符合「{pass_mode}」— 試改 **全部有分數** 或放鬆 W/D 條件"
         )
-        out_path.write_text(md, encoding="utf-8")
-        append_logs([f"FS 掃描 {sym}：0 日"])
+        _fs_bt_publish_report(
+            md=md,
+            title=title,
+            symbol=sym,
+            path=out_path,
+            key_prefix=key_prefix,
+            flash=flash,
+        )
         return
 
     best = max(rows, key=lambda r: r.peak_60d or -999)
@@ -690,7 +745,13 @@ def run_fs_csv_backtest(
     filters,
     key_prefix: str,
 ) -> None:
+    import importlib
+    import analyze_tv_csv
+    import first_screen
     import backtest_first_screen as fsbt
+    importlib.reload(analyze_tv_csv)
+    importlib.reload(first_screen)
+    importlib.reload(fsbt)
 
     progress = st.progress(0.0, text="準備 CSV 回測…")
     status = st.empty()
@@ -699,14 +760,19 @@ def run_fs_csv_backtest(
         progress.progress(i / max(total, 1), text=f"[{i}/{total}] {sym}")
         status.caption(f"回測 **{sym}** @ {as_of.isoformat()}")
 
-    rows = fsbt.backtest_csv_at_date(
-        csv_path,
-        as_of,
-        filters=filters,
-        limit=limit,
-        only_pass=only_pass,
-        progress_callback=on_progress,
-    )
+    try:
+        rows = fsbt.backtest_csv_at_date(
+            csv_path,
+            as_of,
+            filters=filters,
+            limit=limit,
+            only_pass=only_pass,
+            progress_callback=on_progress,
+        )
+    except Exception as e:
+        progress.empty()
+        status.empty()
+        _bt_fail(f"CSV 回測失敗：{e}")
     progress.empty()
     status.empty()
     md = fsbt.format_csv_backtest_md(rows, csv_path, as_of, filters=filters)
@@ -764,9 +830,12 @@ def render_fs_backtest_panel(
             "只用 as-of 日及之前 K 線；**+20/40/60 日**同 **60 日內最高** 係事後驗證。"
             " 用上面 W/D/RS 勾選做篩選條件。跑完會自動載入 **📄 報告區**。"
         )
+        if err := st.session_state.get("last_error"):
+            st.warning(err)
+        if "fs_bt_sym" not in st.session_state:
+            st.session_state["fs_bt_sym"] = st.session_state.get("fs_bt_scan_sym", "")
         fs_sym = st.text_input(
             "單股代號（區間掃描）",
-            value="",
             placeholder="MU、STX、WOLF…",
             key="fs_bt_sym",
         ).strip().upper()
@@ -783,6 +852,7 @@ def render_fs_backtest_panel(
             fs_bt_pass = st.selectbox(
                 "區間掃描顯示",
                 ["pass", "ab", "all"],
+                index=2,
                 format_func=lambda x: {
                     "pass": "只入選",
                     "ab": "入選 + Grade B",
@@ -792,39 +862,33 @@ def render_fs_backtest_panel(
             )
 
         if st.button("🔍 單股單日回測", use_container_width=True, key="fs_bt_single"):
-            if not fs_sym:
-                st.session_state["last_error"] = "請輸入單股代號"
-            else:
-                run_fs_single_backtest(fs_sym, fs_bt_date, filters=fs_filters, key_prefix="fs")
+            run_fs_single_backtest(fs_sym, fs_bt_date, filters=fs_filters, key_prefix="fs")
 
         st.markdown("**日期區間掃描**（搵幾時入選 + 之後升幾多）")
         sc1, sc2 = st.columns(2)
         with sc1:
             fs_scan_end = st.date_input(
                 "結束日",
-                value=date(2026, 4, 21),
+                value=date(2025, 12, 31),
                 max_value=date.today(),
                 key="fs_scan_end",
             )
         with sc2:
             fs_scan_start = st.date_input(
                 "開始日",
-                value=date(2026, 1, 1),
+                value=date(2025, 12, 1),
                 max_value=date.today(),
                 key="fs_scan_start",
             )
         if st.button("開始單股區間掃描", use_container_width=True, key="fs_bt_scan"):
-            if not fs_sym:
-                st.session_state["last_error"] = "請輸入單股代號"
-            else:
-                run_fs_backtest_scan(
-                    fs_sym,
-                    fs_scan_start,
-                    fs_scan_end,
-                    pass_mode=fs_bt_pass,
-                    filters=fs_filters,
-                    key_prefix="fs",
-                )
+            run_fs_backtest_scan(
+                fs_sym,
+                fs_scan_start,
+                fs_scan_end,
+                pass_mode=fs_bt_pass,
+                filters=fs_filters,
+                key_prefix="fs",
+            )
 
         scan_sym = st.session_state.get("fs_bt_scan_sym") or fs_sym
         if scan_rows:
@@ -900,7 +964,7 @@ def render_first_screen_section(
 ) -> None:
     """First Screen — 置頂；設定寫入 .local/ui_prefs.json（F5 保留）。"""
     ensure_all_ui_prefs()
-    fs_mod = _first_screen()
+    fs_mod = _first_screen(fresh=True)
 
     st.subheader("🌱 First Screen 初篩")
     st.caption(
