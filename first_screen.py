@@ -28,6 +28,23 @@ import analyze_tv_csv as tv  # noqa: E402
 import screen_screener_csv as screener  # noqa: E402
 
 REPORTS = ROOT / "reports" / "first_screen"
+_CLOUD_FS_REPORTS: Path | None = None
+
+
+def get_fs_reports_dir() -> Path:
+    """Writable First Screen output dir (temp on Streamlit Cloud)."""
+    global _CLOUD_FS_REPORTS
+    try:
+        from edge_common import is_cloud_environment
+    except ImportError:
+        return REPORTS
+    if not is_cloud_environment():
+        return REPORTS
+    if _CLOUD_FS_REPORTS is None:
+        import tempfile
+        _CLOUD_FS_REPORTS = Path(tempfile.gettempdir()) / "9edge" / "first_screen"
+    _CLOUD_FS_REPORTS.mkdir(parents=True, exist_ok=True)
+    return _CLOUD_FS_REPORTS
 
 FS_TV_IMPORT_OPTIONS: list[tuple[str, str]] = [
     ("FirstScreen_{date}_comma.txt", "入選全部（建議 · 含 Sector / Industry）"),
@@ -39,11 +56,16 @@ FS_TV_IMPORT_OPTIONS: list[tuple[str, str]] = [
 ]
 
 MIN_BARS_D = 60
-MIN_BARS_W = 30
-VOLUME_WINDOW_D = 20
+MIN_BARS_W = 55
+VOLUME_WINDOW_D = 20  # fallback cap when MA 轉平搵唔到
 VOLUME_WINDOW_W = 12
 VOLUME_MA_D = 50  # 同 TV Volume MA（D1）
-VOLUME_MA_W = 12  # W1 週線 Volume MA
+VOLUME_MA_W = 50  # 同 TV Volume MA（W1）
+VOLUME_MA_FLAT_MAX_SPAN_D = 45  # 量價 window 最長 cap
+VOLUME_MA_FLAT_LOCAL_SPAN_D = 18  # 搵 trough / 轉平只睇近 ~18 根（避免攞到更早浪谷）
+VOLUME_MA_FLAT_MAX_SPAN_W = 20
+VOLUME_MA_FLAT_LOCAL_SPAN_W = 10
+VOLUME_DOWN_VOL_SLACK = 0.05  # 跌日：vol ≤ VolMA × (1 + slack)
 
 
 @dataclass(frozen=True)
@@ -53,11 +75,13 @@ class VolumePassConfig:
     - pass_ratio：升/跌日入面幾多比例根 K 要符合（對應 TV 逐根睇藍線）
     - min_hits：最少幾根（避免 W 線樣本少時 2/3 巧合過關）
     - require_avg：升/跌日**平均量** vs 該組**平均 VolMA** 都要啱（平滑單日異常）
+    - down_vol_slack：跌日容差（0.05 = 可 ≤ VolMA×1.05）；升日維持嚴格 >
     """
 
     pass_ratio: float
     min_hits: int
     require_avg: bool = True
+    down_vol_slack: float = VOLUME_DOWN_VOL_SLACK
 
 
 # D1 樣本多（~20 日 window）→ 稍嚴；W1 樣本少（~12 週）→ 稍鬆 + 必須均量確認
@@ -91,17 +115,95 @@ def _volume_side_pass(
     """Return (pass, per_bar_ok, avg_ok, need_hits)."""
     if total <= 0 or avg_vma <= 0:
         return False, False, False, 0
-    need = max(cfg.min_hits, math.ceil(total * cfg.pass_ratio))
+    # 短 window 跌日少：need 唔可以大過 total（例：3 跌日唔使硬要 4 根）
+    need = max(min(cfg.min_hits, total), math.ceil(total * cfg.pass_ratio))
     per_bar_ok = hit >= need
     if up_side:
         avg_ok = avg_vol > avg_vma
     else:
-        avg_ok = avg_vol < avg_vma
+        slack = 1.0 + cfg.down_vol_slack
+        avg_ok = avg_vol < avg_vma * slack
     if cfg.require_avg:
         ok = per_bar_ok and avg_ok
     else:
         ok = per_bar_ok
     return ok, per_bar_ok, avg_ok, need
+
+
+def find_ma10_flat_start(
+    s10: list[float],
+    *,
+    slope_bars: int = 5,
+    flat_slope: float = 0.008,
+    max_span: int = 45,
+    local_span: int = 18,
+    min_pullback: float = 0.03,
+    fallback_window: int = 20,
+) -> int:
+    """量價 window 起點：10MA 真正轉平日（唔計仍向下斜率段）。
+
+    由近段 trough 向前掃：slope 唔再急跌（≥-1%/5bar）或 3-bar 10MA 橫行 → 開始計跌量。
+    MU 8/12：8/1 slope -2.7% 仍跌 ❌ → 8/8 +0.1% ✅；12/1 微平 ✅。
+    """
+    n = len(s10)
+    if n < slope_bars + 15:
+        return max(0, n - fallback_window)
+
+    def slope_at(i: int) -> float:
+        if i < slope_bars:
+            return 0.0
+        base = s10[i - slope_bars]
+        return (s10[i] - base) / base if base > 0 else 0.0
+
+    end = n - 1
+    search_start = max(slope_bars + 5, end - local_span)
+
+    # 近段 recovery 起點嘅 10MA 谷（由尾往前，同 detect_ma_inflection_up；避免 W 線攞到更早 Jan 低點）
+    min_i = end
+    while min_i > search_start and s10[min_i] >= s10[min_i - 1] * 0.997:
+        min_i -= 1
+    min_v = s10[min_i]
+
+    peak_start = max(0, min_i - 25)
+    peak_end = max(peak_start, min_i - 3)
+    peak_i = max(range(peak_start, peak_end + 1), key=lambda k: s10[k])
+    if s10[peak_i] < min_v * (1 + min_pullback):
+        return max(0, n - fallback_window)
+
+    flat_start = min_i
+    for i in range(min_i, end + 1):
+        if slope_at(i) >= -flat_slope:
+            flat_start = i
+            break
+
+    if end - flat_start + 1 > max_span:
+        flat_start = end - max_span + 1
+    # 轉平剛開始 1–2 根都 accept，唔 fallback 去固定 20/12 日
+    return max(0, min(flat_start, end))
+
+
+def volume_window_start(
+    bars: list[dict],
+    *,
+    tf_label: str,
+    fixed_window: int,
+) -> int:
+    """Dynamic seg_start index for volume scan (inclusive)."""
+    closes = [b["close"] for b in bars]
+    s10 = tv.sma(closes, 10)
+    if tf_label == "W1":
+        return find_ma10_flat_start(
+            s10,
+            max_span=VOLUME_MA_FLAT_MAX_SPAN_W,
+            local_span=VOLUME_MA_FLAT_LOCAL_SPAN_W,
+            fallback_window=fixed_window,
+        )
+    return find_ma10_flat_start(
+        s10,
+        max_span=VOLUME_MA_FLAT_MAX_SPAN_D,
+        local_span=VOLUME_MA_FLAT_LOCAL_SPAN_D,
+        fallback_window=fixed_window,
+    )
 
 
 @dataclass
@@ -234,8 +336,9 @@ def assess_volume_up_down(
     window: int,
     vol_ma_len: int = VOLUME_MA_D,
     vol_cfg: VolumePassConfig | None = None,
+    tf_label: str = "D1",
 ) -> dict:
-    """量價配合：股升日量>VolMA、股跌日量<VolMA（逐根 K + 可選均量確認）。"""
+    """量價配合：股升日量>VolMA、股跌日量<VolMA×(1+slack)（逐根 K + 可選均量確認）。"""
     cfg = vol_cfg or VOLUME_CFG_D
     fail = {
         "pass": False,
@@ -249,6 +352,8 @@ def assess_volume_up_down(
         "up_total": 0,
         "down_hit": 0,
         "down_total": 0,
+        "window_bars": 0,
+        "window_from": None,
         "note": "量價數據不足",
     }
     min_need = max(window + 5, vol_ma_len + 2)
@@ -257,7 +362,9 @@ def assess_volume_up_down(
 
     vols = [float(b["volume"]) for b in bars]
     vol_ma = tv.sma(vols, vol_ma_len)
-    seg_start = len(bars) - window
+    seg_start = volume_window_start(bars, tf_label=tf_label, fixed_window=window)
+    down_cap = 1.0 + cfg.down_vol_slack
+    slack_pct = int(cfg.down_vol_slack * 100)
 
     up_hit = up_total = down_hit = down_total = 0
     up_vols: list[float] = []
@@ -277,7 +384,7 @@ def assess_volume_up_down(
             down_total += 1
             down_vols.append(vol)
             down_vmas.append(vma)
-            if vol < vma:
+            if vol < vma * down_cap:
                 down_hit += 1
         elif b["close"] > prev:
             up_total += 1
@@ -286,14 +393,71 @@ def assess_volume_up_down(
             if vol > vma:
                 up_hit += 1
 
+    if up_total == 0 and down_total == 0:
+        return {
+            **fail,
+            "window_bars": len(bars) - seg_start,
+            "window_from": bars[seg_start].get("date") if seg_start < len(bars) else None,
+            "note": "近段股升/股跌日太少（跟前收市比）",
+        }
+
+    # 轉平後只得升日（V 底剛起 1–2 根）：無跌日可量 → down_vol 視為 pass
+    if down_total == 0 and up_total > 0:
+        up_avg = sum(up_vols) / len(up_vols)
+        vma_up_avg = sum(up_vmas) / len(up_vmas)
+        vol_ma_now = vol_ma[-1]
+        win_from = bars[seg_start].get("date")
+        win_n = len(bars) - seg_start
+        up_high, _, up_avg_ok, up_need = _volume_side_pass(
+            up_hit, up_total, up_avg, vma_up_avg, cfg=cfg, up_side=True
+        )
+        note = (
+            f"窗{win_n}根(自{win_from})；"
+            f"轉平後無跌日✓；"
+            f"股升 {up_hit}/{up_total}≥{up_need}根"
+            f"{'✓' if up_high else '✗'}"
+        )
+        return {
+            "pass": up_high,
+            "up_avg": round(up_avg),
+            "down_avg": 0,
+            "vol_ma": round(vol_ma_now),
+            "vol_ma_len": vol_ma_len,
+            "up_high": up_high,
+            "down_low": True,
+            "up_higher": up_high,
+            "up_hit": up_hit,
+            "up_total": up_total,
+            "down_hit": 0,
+            "down_total": 0,
+            "up_need": up_need,
+            "down_need": 0,
+            "up_per_bar": up_hit >= up_need if up_need else False,
+            "down_per_bar": True,
+            "up_avg_ok": up_avg_ok,
+            "down_avg_ok": True,
+            "vma_up_avg": round(vma_up_avg),
+            "vma_down_avg": 0,
+            "window_bars": win_n,
+            "window_from": win_from,
+            "note": note,
+        }
+
     if up_total == 0 or down_total == 0:
-        return {**fail, "note": "近段股升/股跌日太少（跟前收市比）"}
+        return {
+            **fail,
+            "window_bars": len(bars) - seg_start,
+            "window_from": bars[seg_start].get("date") if seg_start < len(bars) else None,
+            "note": "近段股升/股跌日太少（跟前收市比）",
+        }
 
     up_avg = sum(up_vols) / len(up_vols)
     down_avg = sum(down_vols) / len(down_vols)
     vma_up_avg = sum(up_vmas) / len(up_vmas)
     vma_down_avg = sum(down_vmas) / len(down_vmas)
     vol_ma_now = vol_ma[-1]
+    win_from = bars[seg_start].get("date")
+    win_n = len(bars) - seg_start
 
     up_high, up_bar, up_avg_ok, up_need = _volume_side_pass(
         up_hit, up_total, up_avg, vma_up_avg, cfg=cfg, up_side=True
@@ -304,10 +468,11 @@ def assess_volume_up_down(
 
     pct = int(cfg.pass_ratio * 100)
     note = (
+        f"窗{win_n}根(自{win_from})；"
         f"股升 {up_hit}/{up_total}≥{up_need}根({pct}%+均量{'✓' if up_avg_ok else '✗'})"
         f"{'✓' if up_high else '✗'}"
         f"；股跌 {down_hit}/{down_total}≥{dn_need}根"
-        f"({'✓' if dn_avg_ok else '✗'}均量)"
+        f"(≤VolMA+{slack_pct}%·{'✓' if dn_avg_ok else '✗'}均量)"
         f"{'✓' if down_low else '✗'}"
     )
     return {
@@ -331,17 +496,21 @@ def assess_volume_up_down(
         "down_avg_ok": dn_avg_ok,
         "vma_up_avg": round(vma_up_avg),
         "vma_down_avg": round(vma_down_avg),
+        "window_bars": win_n,
+        "window_from": win_from,
         "note": note,
     }
 
 
-def assess_ma_turn_up(bars: list[dict]) -> dict:
+def assess_ma_turn_up(bars: list[dict], *, weekly: bool = False) -> dict:
     closes = [b["close"] for b in bars]
     s10 = tv.sma(closes, 10)
     s20 = tv.sma(closes, 20)
     s50 = tv.sma(closes, 50)
     e20 = tv.ema(closes, 20)
-    ok, detail = tv.detect_ma_inflection_up(s10, s20, s50, e20, closes[-1])
+    ok, detail = tv.detect_ma_inflection_up(
+        s10, s20, s50, e20, closes[-1], relax_now_rising=weekly,
+    )
     return {
         "pass": ok,
         "detail": detail,
@@ -428,11 +597,15 @@ def assess_tf_screen(
     if len(bars) < min_bars:
         return empty
 
-    ma = assess_ma_turn_up(bars)
+    ma = assess_ma_turn_up(bars, weekly=(tf_label == "W1"))
     pb_peak = 12 if tf_label == "W1" else 50
     pb = assess_pullback_ma_turn(bars, peak_window=pb_peak)
     vol = assess_volume_up_down(
-        bars, window=volume_window, vol_ma_len=volume_ma_len, vol_cfg=vol_cfg
+        bars,
+        window=volume_window,
+        vol_ma_len=volume_ma_len,
+        vol_cfg=vol_cfg,
+        tf_label=tf_label,
     )
     bull = assess_big_bullish_candles(bars, cfg=bull_cfg)
     last = bars[-1]
@@ -1063,19 +1236,20 @@ def run_screen(
         if delay > 0:
             time.sleep(delay)
 
-    REPORTS.mkdir(parents=True, exist_ok=True)
+    out_dir = get_fs_reports_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
     stem = csv_path.stem
     today = date.today().isoformat()
-    summary_path = REPORTS / f"FIRST_SCREEN_{stem}_{today}_summary.md"
-    json_path = REPORTS / f"FIRST_SCREEN_{stem}_{today}_results.json"
+    summary_path = out_dir / f"FIRST_SCREEN_{stem}_{today}_summary.md"
+    json_path = out_dir / f"FIRST_SCREEN_{stem}_{today}_results.json"
 
     summary_md = format_batch_summary(results, csv_path.name, filters=filters)
     summary_path.write_text(summary_md, encoding="utf-8")
     json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    export_dir = REPORTS / f"FirstScreen_{today}"
+    export_dir = out_dir / f"FirstScreen_{today}"
     export_tv_watchlists(results, meta, export_dir)
-    dated_hits_path = REPORTS / f"FirstScreen_{today}_hits_comma.txt"
+    dated_hits_path = out_dir / f"FirstScreen_{today}_hits_comma.txt"
     watchlist_name = f"FirstScreen_{today}"
 
     hits = [r["symbol"] for r in results if r.get("pass")]

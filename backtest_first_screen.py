@@ -23,6 +23,15 @@ REPORTS = ROOT / "reports" / "first_screen" / "backtest"
 ProgressCallback = Callable[[int, int, date], None]
 CsvProgressCallback = Callable[[int, int, str], None]
 
+
+def _ensure_fresh_fs():
+    """Streamlit keeps old modules in memory — reload before each backtest run."""
+    import importlib
+    global fs, tv
+    tv = importlib.reload(tv)
+    fs = importlib.reload(fs)
+    return fs
+
 DEFAULT_HORIZONS = (20, 40, 60)
 
 
@@ -129,6 +138,7 @@ def scan_backtest_range(
     progress_callback: ProgressCallback | None = None,
 ) -> list[FsBacktestScanRow]:
     """Walk calendar days end→start; return rows matching pass filter."""
+    _ensure_fresh_fs()
     if start > end:
         start, end = end, start
     sym = symbol.upper()
@@ -187,6 +197,7 @@ def backtest_csv_at_date(
     progress_callback: CsvProgressCallback | None = None,
 ) -> list[FsCsvBacktestRow]:
     """Run First Screen on whole screener CSV as-of one date."""
+    _ensure_fresh_fs()
     symbols = screener.read_screener_symbols(csv_path)
     if limit > 0:
         symbols = symbols[:limit]
@@ -237,6 +248,7 @@ def run_single_backtest(
     filters: fs.FirstScreenFilters | None = None,
     out: Path | None = None,
 ) -> tuple[dict, Path]:
+    _ensure_fresh_fs()
     sym = symbol.upper()
     data = fs.score_symbol(sym, as_of=as_of, filters=filters)
     if not data:
@@ -267,7 +279,10 @@ def format_scan_md(
         "",
         "> 只用 as-of 日及之前 K 線；**+20/40/60 日**同 **60 日內最高** 為事後驗證（唔係當日已知）。",
         "",
-        f"**命中**：{len(rows)} 日",
+    ]
+    n_pass = sum(1 for r in rows if r.pass_list)
+    lines.append(f"**掃描**：{len(rows)} 日 · **入選**：{n_pass} 日")
+    lines += [
         "",
     ]
     if not rows:

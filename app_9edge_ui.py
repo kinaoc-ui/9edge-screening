@@ -147,10 +147,13 @@ def resolve_screener_csv(
     default_csv: Path | None,
 ) -> Path | None:
     if uploaded:
-        tmp = ROOT / "screener" / uploaded.name
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_bytes(uploaded.getvalue())
-        return tmp
+        if is_cloud_environment():
+            target = get_csv_dir() / uploaded.name
+        else:
+            target = ROOT / "screener" / uploaded.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(uploaded.getvalue())
+        return target
     custom = (path_text or "").strip().strip('"')
     if custom:
         p = Path(custom).expanduser()
@@ -967,6 +970,11 @@ def render_first_screen_section(
     fs_mod = _first_screen(fresh=True)
 
     st.subheader("🌱 First Screen 初篩")
+    if is_cloud_environment():
+        st.caption(
+            "☁️ Cloud 模式：上載 Screener CSV 即可跑初篩 + 回測；"
+            "報告喺下方 **📄 報告區**（可 Download）。TV MCP 匯入要本機。"
+        )
     st.caption(
         "W/D 子項可單獨 tick；都冇勾 = **W 或 D 3/3**。"
         " **設定自動儲存**（`.local/ui_prefs.json`），F5 唔使重 tick。"
@@ -2249,6 +2257,9 @@ def render_tools_expander(
 
 
 def main_cloud() -> None:
+    ensure_all_ui_prefs()
+    render_first_screen_section()
+
     render_cloud_toolbar()
 
     with st.sidebar:
@@ -2258,10 +2269,10 @@ def main_cloud() -> None:
         st.error(err)
 
     has_report = render_report_zone(
-        empty_hint="輸入代號撳 **🔍 分析**，報告會自動顯示喺報告區。",
+        empty_hint="🌱 **First Screen** 上載 CSV 撳開始；或 Sidebar **報告庫** 載入摘要。",
     )
     if not has_report:
-        st.info("輸入代號撳 **🔍 分析**，報告會自動加入 **📄 報告區**。")
+        st.info("🌱 上載 Screener CSV 跑 **First Screen**，或 Sidebar 載入已有報告。")
 
 
 def main_local(

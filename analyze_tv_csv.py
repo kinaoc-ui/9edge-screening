@@ -1822,42 +1822,91 @@ def detect_ma_inflection_up(
     e20: list[float],
     close: float,
     *,
-    lookback: int = 15,
+    lookback: int = 35,
+    relax_now_rising: bool = False,
 ) -> tuple[bool, str]:
     """
-    10MA 由平/向下轉向上（搵剛轉好 — 唔使等完整 10>20>50）。
-    返回 (是否觸發, 報告用細節)。
+    10MA 由跌/平 → 再向上（搵轉好位，容許 V 底未過 50MA）。
+
+    邏輯：
+    1. 近 lookback 根內搵 10MA 谷（之前有跌/平）
+    2. 10MA 已自谷回升 + 短線連續向上
+    3. 20MA 開始轉上（3 日 slope 或高過近段低點）
+    4. 價企穩 10MA（早期 V 底唔強求過 50MA）
     """
-    if len(s10) < lookback + 5 or len(s20) < 8 or len(s50) < 8:
+    if len(s10) < lookback or len(s20) < 10 or len(s50) < 10:
         return False, "K 線不足"
 
-    s10_early = s10[-lookback]
-    s10_mid = s10[-lookback // 2]
-    was_flat_or_down = s10_mid <= s10_early * 1.008
-    now_rising = s10[-1] > s10[-4] and s10[-4] >= s10[-7] * 0.998
-    s20_turning = s20[-1] > s20[-6]
-    s50_turning = s50[-1] > s50[-8]
-    stacking = s10[-1] >= s20[-1] * 0.992 and s20[-1] >= s50[-1] * 0.985
-    price_ok = close > e20[-1] and close > s50[-1]
+    n = len(s10)
+    search_start = max(8, n - lookback)
+    # 由尾往前：搵「升勢開始前」最近個谷（唔攞 window 最舊低點）
+    i = n - 1
+    while i > search_start and s10[i] >= s10[i - 1] * 0.997:
+        i -= 1
+    trough_i = i
+    trough_val = s10[trough_i]
 
-    if was_flat_or_down and now_rising and s20_turning and stacking and price_ok:
+    ref_start = max(search_start, trough_i - 15)
+    prior_peak = max(s10[ref_start : trough_i + 1]) if trough_i > ref_start else trough_val
+    drop_pct = (prior_peak - trough_val) / prior_peak if prior_peak > 0 else 0.0
+    had_pullback = drop_pct >= 0.03 or (
+        trough_i >= 3 and s10[trough_i - 3] > s10[trough_i] * 1.003
+    ) or (
+        trough_i >= 5 and s10[trough_i - 1] <= s10[trough_i - 5] * 1.008
+    )
+
+    recovered = s10[-1] > trough_val * 1.01
+    if relax_now_rising:
+        # W1：U 底剛轉上時 6-bar slope 常被前段高位 drag；睇短斜率 + 自谷回升
+        now_rising = s10[-1] > s10[-3] and s10[-1] > trough_val * 1.008
+    else:
+        now_rising = s10[-1] > s10[-3] and s10[-3] >= s10[-6] * 0.995
+
+    s20_floor = min(s20[-8:-1])
+    s20_turning = s20[-1] > s20[-3] or s20[-1] > s20_floor * 1.001
+
+    s50_turning = s50[-1] > s50[-8]
+    above_10 = close > s10[-1]
+    above_e20 = close > e20[-1]
+    # V 底：企穩 10MA 就得；升勢確認：再過 EMA20
+    price_ok = above_10 and (above_e20 or close > s50[-1] * 0.92)
+
+    # 早期 V 底 50MA 仲喺上面 — 只要求 10MA 追緊 20MA
+    stacking = s10[-1] >= s20[-1] * 0.94 or (above_10 and s10[-1] > trough_val * 1.02)
+
+    days_since_trough = n - 1 - trough_i
+    in_window = days_since_trough <= lookback
+
+    if (
+        had_pullback
+        and recovered
+        and now_rising
+        and s20_turning
+        and stacking
+        and price_ok
+        and in_window
+    ):
         detail = (
-            f"10MA {s10[-15]:.2f}→{s10[-1]:.2f}；"
+            f"10MA 谷 {trough_val:.2f}→{s10[-1]:.2f}（+{(s10[-1]/trough_val-1)*100:.0f}%）；"
             f"20MA 轉上；{'50MA 轉上' if s50_turning else '50MA 追趕中'}"
         )
         return True, detail
 
     gaps = []
-    if not was_flat_or_down:
-        gaps.append("10MA 未見平/向下")
+    if not had_pullback:
+        gaps.append("近段未見跌/平")
+    if not recovered:
+        gaps.append("10MA 未自谷回升")
     if not now_rising:
         gaps.append("10MA 未連續向上")
     if not s20_turning:
         gaps.append("20MA 未轉上")
     if not stacking:
-        gaps.append("10/20/50 未貼近排列")
+        gaps.append("10/20MA 未貼近")
     if not price_ok:
-        gaps.append("收市未企穩 EMA20/50MA 上")
+        gaps.append("收市未企穩 10MA/EMA20")
+    if not in_window:
+        gaps.append("轉好窗口已過")
     return False, "；".join(gaps) if gaps else "條件未齊"
 
 
