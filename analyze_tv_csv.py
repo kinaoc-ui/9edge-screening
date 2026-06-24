@@ -3260,8 +3260,14 @@ def pct_return(closes: list[float], lookback: int | None = None) -> float | None
 def assess_rs_leading_ma_vs_spy(
     stock_closes: list[float],
     spy_closes: list[float],
+    *,
+    gap_win_pct: float = 0.0,
 ) -> tuple[bool, bool, str, str]:
-    """Feature 2: compare price vs 10/20/50 MA — stock position leads SPY."""
+    """Feature 2: price vs 10/20/50 MA — stock leads SPY by gap % (not just up/down count).
+
+    Compare (close/MA - 1) for each period; pass long when mean stock gap is strictly
+    greater than SPY mean gap (even +1% edge counts).
+    """
     if len(stock_closes) < 50 or len(spy_closes) < 50:
         return False, False, "領先MA：數據不足", "弱勢MA：數據不足"
 
@@ -3269,36 +3275,50 @@ def assess_rs_leading_ma_vs_spy(
         c = closes[-1]
         return {p: c > sma(closes, p)[-1] for p in (10, 20, 50)}
 
+    def _ma_gaps(closes: list[float]) -> dict[int, float]:
+        c = closes[-1]
+        return {p: (c / sma(closes, p)[-1] - 1) * 100 for p in (10, 20, 50)}
+
     def _fmt(flags: dict[int, bool]) -> str:
         return "/".join(f"{p}{'上' if flags[p] else '下'}" for p in (10, 20, 50))
 
+    def _fmt_gaps(gaps: dict[int, float]) -> str:
+        return " ".join(f"{p}{gaps[p]:+.1f}%" for p in (10, 20, 50))
+
     stock_f = _ma_flags(stock_closes)
     spy_f = _ma_flags(spy_closes)
+    stock_g = _ma_gaps(stock_closes)
+    spy_g = _ma_gaps(spy_closes)
     sc = stock_closes[-1]
     sp = spy_closes[-1]
     stock_score = sum(stock_f.values())
     spy_score = sum(spy_f.values())
+    avg_stock_g = sum(stock_g.values()) / 3
+    avg_spy_g = sum(spy_g.values()) / 3
+    gap_edge = avg_stock_g - avg_spy_g
 
-    long_pass = stock_score > spy_score
-    short_pass = stock_score < spy_score
+    long_pass = gap_edge > gap_win_pct
+    short_pass = gap_edge < -gap_win_pct
 
     if long_pass:
         long_note = (
-            f"領先MA：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
-            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+            f"領先MA：股 ${sc:.2f} [{_fmt(stock_f)}] gap均{avg_stock_g:+.1f}% "
+            f"({_fmt_gaps(stock_g)}) vs SPY ${sp:.2f} [{_fmt(spy_f)}] gap均{avg_spy_g:+.1f}% "
+            f"({_fmt_gaps(spy_g)}) · 大過{gap_edge:+.1f}%"
         )
     else:
         long_note = (
-            f"領先MA未過：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
-            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+            f"領先MA未過：股 ${sc:.2f} [{_fmt(stock_f)}] gap均{avg_stock_g:+.1f}% "
+            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] gap均{avg_spy_g:+.1f}% "
+            f"· 差距{gap_edge:+.1f}%（要股 gap 均 **大過** SPY）"
         )
     if short_pass:
         short_note = (
-            f"弱勢MA：股 ${sc:.2f} [{_fmt(stock_f)}] {stock_score}/3 "
-            f"vs SPY ${sp:.2f} [{_fmt(spy_f)}] {spy_score}/3"
+            f"弱勢MA：股 gap均{avg_stock_g:+.1f}% vs SPY gap均{avg_spy_g:+.1f}% "
+            f"· 落後{gap_edge:+.1f}%"
         )
     else:
-        short_note = f"弱勢MA未過：股 {stock_score}/3 vs SPY {spy_score}/3"
+        short_note = f"弱勢MA未過：股 gap均{avg_stock_g:+.1f}% vs SPY {avg_spy_g:+.1f}%"
     return long_pass, short_pass, long_note, short_note
 
 
@@ -3394,11 +3414,31 @@ def assess_relative_strength(symbol: str, d1_bars: list[dict] | None = None) -> 
     2) Leading moving averages — stock vs SPY 10/20/50 MA position (relative score)
     3) RS line (stock/SPY ratio) pointing up
     Pass Long/Short when >= 2/3 features (don't need all three).
+
+    When d1_bars given (First Screen / backtest as-of), use those closes + SPY to same date.
     """
     try:
-        stock_closes = yf_daily_closes(symbol, "6mo")
-        spy_closes = yf_daily_closes("SPY", "6mo")
+        as_of: date | None = None
+        if d1_bars and len(d1_bars) >= 50:
+            stock_closes = [float(b["close"]) for b in d1_bars]
+            last_d = d1_bars[-1].get("date")
+            if last_d:
+                as_of = last_d if isinstance(last_d, date) else date.fromisoformat(str(last_d)[:10])
+            spy_bars = yf_fetch_bars("SPY", "1d", as_of=as_of, min_bars=50) if as_of else None
+            spy_closes = (
+                [float(b["close"]) for b in spy_bars]
+                if spy_bars and len(spy_bars) >= 50
+                else None
+            )
+            if not spy_closes:
+                spy_closes = yf_daily_closes("SPY", "6mo")
+        else:
+            stock_closes = yf_daily_closes(symbol, "6mo")
+            spy_closes = yf_daily_closes("SPY", "6mo")
+
         if stock_closes is None or spy_closes is None:
+            return _rs_fail("RS 數據不足")
+        if len(stock_closes) < 50 or len(spy_closes) < 50:
             return _rs_fail("RS 數據不足")
 
         lb = min(63, len(stock_closes) - 1)
