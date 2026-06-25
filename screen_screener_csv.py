@@ -280,14 +280,8 @@ def write_tv_sector_industry_txt(
         ind = x.get("industry") or "Unknown"
         groups.setdefault((sec, ind), []).append(x)
 
+    # No "# ..." comment lines — TV treats them as invalid tickers (#145SYMBOLS…).
     lines: list[str] = []
-    symbol_count = len(rows)
-    section_count = len(groups)
-    lines.append(
-        f"# {symbol_count} symbols · {section_count} sections "
-        f"(### = Sector/Industry group headers, not tickers)"
-    )
-    lines.append("")
     for (sec, ind), grp in sorted(groups.items()):
         if group_label:
             lines.append(f"### {group_label} — {sec} — {ind}")
@@ -300,6 +294,36 @@ def write_tv_sector_industry_txt(
         lines.append("")
 
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def strip_tv_meta_comment_lines(path: Path) -> bool:
+    """Remove legacy '# N symbols · …' first line — TV parses it as a ticker."""
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    lines = text.splitlines(keepends=False)
+    if not lines:
+        return False
+    first = lines[0].strip()
+    if not (first.startswith("#") and "symbols" in first and "sections" in first):
+        return False
+    cleaned = "\n".join(lines[1:]).lstrip("\n")
+    path.write_text((cleaned + "\n") if cleaned else "", encoding="utf-8")
+    return True
+
+
+def repair_tv_export_comment_lines(root: Path) -> int:
+    """Strip legacy meta comment lines from all TV import .txt under root."""
+    n = 0
+    if not root.is_dir():
+        return n
+    for path in root.rglob("*.txt"):
+        if strip_tv_meta_comment_lines(path):
+            n += 1
+    return n
 
 
 def _export_tv_group(

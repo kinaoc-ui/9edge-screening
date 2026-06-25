@@ -179,7 +179,7 @@ def scan_backtest_range(
                 fwd_40d=fwd.get("fwd_40d"),
                 fwd_60d=fwd.get("fwd_60d"),
                 peak_60d=fwd.get("peak_60d"),
-                note=(data.get("note") or "")[:60],
+                note=(data.get("note") or "")[:180],
             )
         )
         cur -= timedelta(days=1)
@@ -228,7 +228,7 @@ def backtest_csv_at_date(
                 fwd_40d=fwd.get("fwd_40d"),
                 fwd_60d=fwd.get("fwd_60d"),
                 peak_60d=fwd.get("peak_60d"),
-                note=(data.get("note") or "")[:60],
+                note=(data.get("note") or "")[:180],
             )
         )
     rows.sort(

@@ -1,6 +1,0 @@
-# 2 symbols · 1 sections (### = Sector/Industry group headers, not tickers)
-
-### Electronic technology — Aerospace & defense
-
-NYSE:GE
-NYSE:HXL

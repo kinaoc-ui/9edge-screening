@@ -1,7 +1,0 @@
-﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
-CARR,NYSE:CARR,Producer manufacturing,Industrial machinery,Carrier Global Corporation,A,W1,True,3,1,4,71.2,W1 3/3：MA轉上；量價配合；大陽2根 | D1 1/3：股跌日量低；大陽2根 | 跌市反向：3M 22.6% vs SPY 12.9% | 領先MA：股 $71.20 [10上/20上/50上] 3/3 vs SPY $738.04 [10下/20下/50上] 1/3
-ENTG,NASDAQ:ENTG,Producer manufacturing,Industrial machinery,"Entegris, Inc.",A,D1,True,1,3,4,169.3,W1 1/3：股升日量高；大陽2根 | D1 3/3：MA轉上；量價配合；大陽2根 | 跌市反向：3M 47.3% vs SPY 12.9% | 領先MA：股 $169.30 [10上/20上/50上] 3/3 vs SPY $738.15 [10下/20下/50上] 1/3
-MIDD,NASDAQ:MIDD,Producer manufacturing,Industrial machinery,The Middleby Corporation,A,W1,True,3,1,4,164.98,W1 3/3：MA轉上；量價配合；大陽2根 | D1 1/3：股跌日量低 | 跌市反向：3M 19.8% vs SPY 12.9% | 領先MA：股 $164.98 [10上/20上/50上] 3/3 vs SPY $737.79 [10下/20下/50上] 1/3
-ROK,NYSE:ROK,Producer manufacturing,Electrical products,"Rockwell Automation, Inc.",A,W1,True,2,1,3,462.92,W1 2/3：MA轉上；股跌日量低；大陽2根 | D1 1/3：股跌日量低 | 跌市反向：3M 29.8% vs SPY 12.9% | 領先MA：股 $462.92 [10上/20上/50上] 3/3 vs SPY $738.17 [10下/20下/50上] 1/3
-MLI,NYSE:MLI,Producer manufacturing,Metal fabrication,"Mueller Industries, Inc.",A,W1,True,2,1,3,136.57,W1 2/3：MA轉上；股跌日量低；大陽3根 | D1 1/3：MA轉上 | 跌市反向：3M 24.5% vs SPY 12.9% | 領先MA：股 $136.57 [10下/20上/50上] 2/3 vs SPY $737.98 [10下/20下/50上] 1/3
-MAS,NYSE:MAS,Producer manufacturing,Building products,Masco Corporation,A,W1,True,2,1,3,74.1,W1 2/3：MA轉上；股跌日量低；大陽1根 | D1 1/3：股跌日量低；大陽2根 | 跌市反向：3M 23.9% vs SPY 12.9% | 領先MA：股 $74.10 [10上/20上/50上] 3/3 vs SPY $737.98 [10下/20下/50上] 1/3

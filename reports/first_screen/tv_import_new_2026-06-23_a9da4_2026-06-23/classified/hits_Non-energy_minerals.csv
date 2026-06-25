@@ -1,4 +1,0 @@
-﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
-MT,NYSE:MT,Non-energy minerals,Steel,Arcelor Mittal NY Registry Shares NEW,A,W1,True,3,2,5,63.75,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
-GGB,NYSE:GGB,Non-energy minerals,Steel,Gerdau S.A.,A,W1,True,3,2,5,4.25,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
-JHX,NYSE:JHX,Non-energy minerals,Construction materials,James Hardie Industries plc.,A,W1,True,3,0,3,24.51,W1 3/3：MA轉上；量價配合 | D1 0/3：未達

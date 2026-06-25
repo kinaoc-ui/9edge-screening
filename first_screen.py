@@ -11,8 +11,6 @@ W1 + D1：MA 轉上 + 量價配合（股升日量>VolMA、股跌日量<VolMA）+
 from __future__ import annotations
 
 import argparse
-import csv
-import json
 import math
 import sys
 import time
@@ -47,12 +45,7 @@ def get_fs_reports_dir() -> Path:
     return _CLOUD_FS_REPORTS
 
 FS_TV_IMPORT_OPTIONS: list[tuple[str, str]] = [
-    ("FirstScreen_{date}_comma.txt", "入選全部（建議 · 含 Sector / Industry）"),
-    ("hits_comma.txt", "入選全部（含 Sector / Industry）"),
-    ("hits_by_sector_industry.txt", "入選 · Sector+Industry 分組（同 dated 檔）"),
-    ("W1_only_comma.txt", "只 W1 入選（含 Sector / Industry）"),
-    ("D1_only_comma.txt", "只 D1 入選（含 Sector / Industry）"),
-    ("W1_D1_both_comma.txt", "W+D 齊過（含 Sector / Industry）"),
+    ("FirstScreen_{date}_comma.txt", "入選全部（含 Sector / Industry）"),
 ]
 
 MIN_BARS_D = 60
@@ -139,11 +132,11 @@ def find_ma10_flat_start(
     local_span: int = 18,
     min_pullback: float = 0.03,
     fallback_window: int = 20,
+    min_flat_bars: int = 1,
 ) -> int:
     """量價 window 起點：10MA 真正轉平日（唔計仍向下斜率段）。
 
-    由近段 trough 向前掃：slope 唔再急跌（≥-1%/5bar）或 3-bar 10MA 橫行 → 開始計跌量。
-    MU 8/12：8/1 slope -2.7% 仍跌 ❌ → 8/8 +0.1% ✅；12/1 微平 ✅。
+    由近段 trough 向前掃：連續 min_flat_bars 根 slope ≥ -flat_slope 先算轉平（預設 1 根）。
     """
     n = len(s10)
     if n < slope_bars + 15:
@@ -172,13 +165,15 @@ def find_ma10_flat_start(
 
     flat_start = min_i
     for i in range(min_i, end + 1):
-        if slope_at(i) >= -flat_slope:
+        end_run = i + min_flat_bars
+        if end_run > end + 1:
+            break
+        if all(slope_at(j) >= -flat_slope for j in range(i, end_run)):
             flat_start = i
             break
 
     if end - flat_start + 1 > max_span:
         flat_start = end - max_span + 1
-    # 轉平剛開始 1–2 根都 accept，唔 fallback 去固定 20/12 日
     return max(0, min(flat_start, end))
 
 
@@ -187,6 +182,7 @@ def volume_window_start(
     *,
     tf_label: str,
     fixed_window: int,
+    min_flat_bars: int = 1,
 ) -> int:
     """Dynamic seg_start index for volume scan (inclusive)."""
     closes = [b["close"] for b in bars]
@@ -197,12 +193,14 @@ def volume_window_start(
             max_span=VOLUME_MA_FLAT_MAX_SPAN_W,
             local_span=VOLUME_MA_FLAT_LOCAL_SPAN_W,
             fallback_window=fixed_window,
+            min_flat_bars=min_flat_bars,
         )
     return find_ma10_flat_start(
         s10,
         max_span=VOLUME_MA_FLAT_MAX_SPAN_D,
         local_span=VOLUME_MA_FLAT_LOCAL_SPAN_D,
         fallback_window=fixed_window,
+        min_flat_bars=min_flat_bars,
     )
 
 
@@ -267,6 +265,7 @@ class FirstScreenFilters:
     d1: TfFilter = field(default_factory=TfFilter)
     require_counter_trend: bool = False
     require_leading_ma: bool = False
+    ma_flat_min_bars: int = 1
 
     def has_tf_filters(self) -> bool:
         return self.w1.is_active() or self.d1.is_active()
@@ -283,6 +282,8 @@ class FirstScreenFilters:
             parts.append("反向走勢")
         if self.require_leading_ma:
             parts.append("領先MA vs SPY")
+        # Always include this knob so users can verify the exact run setting.
+        parts.append(f"MA轉平={self.ma_flat_min_bars}bar")
         return " + ".join(parts)
 
     def needs_rs(self) -> bool:
@@ -337,6 +338,7 @@ def assess_volume_up_down(
     vol_ma_len: int = VOLUME_MA_D,
     vol_cfg: VolumePassConfig | None = None,
     tf_label: str = "D1",
+    ma_flat_min_bars: int = 1,
 ) -> dict:
     """量價配合：股升日量>VolMA、股跌日量<VolMA×(1+slack)（逐根 K + 可選均量確認）。"""
     cfg = vol_cfg or VOLUME_CFG_D
@@ -362,7 +364,9 @@ def assess_volume_up_down(
 
     vols = [float(b["volume"]) for b in bars]
     vol_ma = tv.sma(vols, vol_ma_len)
-    seg_start = volume_window_start(bars, tf_label=tf_label, fixed_window=window)
+    seg_start = volume_window_start(
+        bars, tf_label=tf_label, fixed_window=window, min_flat_bars=ma_flat_min_bars,
+    )
     down_cap = 1.0 + cfg.down_vol_slack
     slack_pct = int(cfg.down_vol_slack * 100)
 
@@ -502,14 +506,19 @@ def assess_volume_up_down(
     }
 
 
-def assess_ma_turn_up(bars: list[dict], *, weekly: bool = False) -> dict:
+def assess_ma_turn_up(
+    bars: list[dict], *, weekly: bool = False, min_flat_bars: int = 1,
+) -> dict:
     closes = [b["close"] for b in bars]
     s10 = tv.sma(closes, 10)
     s20 = tv.sma(closes, 20)
     s50 = tv.sma(closes, 50)
     e20 = tv.ema(closes, 20)
     ok, detail = tv.detect_ma_inflection_up(
-        s10, s20, s50, e20, closes[-1], relax_now_rising=weekly,
+        s10, s20, s50, e20, closes[-1],
+        closes=closes,
+        relax_now_rising=weekly,
+        min_flat_bars=min_flat_bars,
     )
     return {
         "pass": ok,
@@ -579,6 +588,7 @@ def assess_tf_screen(
     vol_cfg: VolumePassConfig,
     bull_cfg: BigBullPassConfig,
     min_bars: int,
+    ma_flat_min_bars: int = 1,
 ) -> dict:
     """單一 TF 三項初篩。"""
     empty = {
@@ -597,7 +607,9 @@ def assess_tf_screen(
     if len(bars) < min_bars:
         return empty
 
-    ma = assess_ma_turn_up(bars, weekly=(tf_label == "W1"))
+    ma = assess_ma_turn_up(
+        bars, weekly=(tf_label == "W1"), min_flat_bars=ma_flat_min_bars,
+    )
     pb_peak = 12 if tf_label == "W1" else 50
     pb = assess_pullback_ma_turn(bars, peak_window=pb_peak)
     vol = assess_volume_up_down(
@@ -606,6 +618,7 @@ def assess_tf_screen(
         vol_ma_len=volume_ma_len,
         vol_cfg=vol_cfg,
         tf_label=tf_label,
+        ma_flat_min_bars=ma_flat_min_bars,
     )
     bull = assess_big_bullish_candles(bars, cfg=bull_cfg)
     last = bars[-1]
@@ -628,6 +641,8 @@ def assess_tf_screen(
     notes = []
     if ma["pass"]:
         notes.append(f"MA轉上")
+    elif ma.get("detail"):
+        notes.append(f"MA未過：{ma.get('detail')}")
     if pb["pass"]:
         notes.append("拉回後轉上")
     if up_high and down_low:
@@ -814,6 +829,9 @@ def score_symbol(
     if not d1_bars and not w1_bars:
         return None
 
+    flat_bars = int(filters.ma_flat_min_bars) if filters else 1
+    flat_bars = max(1, flat_bars)
+
     w1 = assess_tf_screen(
         w1_bars or [],
         tf_label="W1",
@@ -822,6 +840,7 @@ def score_symbol(
         vol_cfg=VOLUME_CFG_W,
         bull_cfg=BIG_BULL_CFG_W,
         min_bars=MIN_BARS_W,
+        ma_flat_min_bars=flat_bars,
     )
     d1 = assess_tf_screen(
         d1_bars or [],
@@ -831,6 +850,7 @@ def score_symbol(
         vol_cfg=VOLUME_CFG_D,
         bull_cfg=BIG_BULL_CFG_D,
         min_bars=MIN_BARS_D,
+        ma_flat_min_bars=flat_bars,
     )
     combo = combine_wd(w1, d1)
     rs = None
@@ -939,20 +959,44 @@ def format_batch_summary(
     source_name: str,
     *,
     filters: FirstScreenFilters | None = None,
+    total_symbols: int = 0,
+    skipped: int = 0,
+    skip_reasons: dict[str, int] | None = None,
+    warning: str = "",
 ) -> str:
     today = date.today().isoformat()
     hits = [r for r in results if r.get("pass")]
     b_list = [r for r in results if r.get("grade") == "B"]
+    csv_total = total_symbols or (len(results) + skipped)
 
     lines = [
         f"# First Screen 初篩（W1 + D1）— {today}",
         "",
-        f"**來源**：{source_name}（{len(results)} 隻成功分析）",
+        f"**來源**：{source_name}",
+        "",
+        "| 統計 | 數量 |",
+        "|------|------|",
+        f"| **CSV 總數** | {csv_total} |",
+        f"| **已分析** | {len(results)} |",
+        f"| **跳過** | {skipped} |",
+        f"| **入選** | {len(hits)} |",
         "",
         f"> **入選條件**：{(filters.summary() if filters else 'W 或 D 任一中晒 3/3')}",
         "",
         "> W1（近 12 週）+ D1（近 20 日）量價初篩；勾選嘅 optional 條件必須一齊過。",
         "",
+    ]
+    if warning:
+        lines += [f"> ⚠️ **{warning}**", ""]
+    if skip_reasons:
+        top = sorted(skip_reasons.items(), key=lambda x: -x[1])[:8]
+        lines += [
+            "> **跳過原因（摘要）**："
+            + " · ".join(f"{reason} ×{n}" for reason, n in top),
+            "",
+        ]
+
+    lines += [
         "## 摘要",
         "",
         "| 類別 | 數量 |",
@@ -1052,100 +1096,30 @@ def _repair_legacy_sector_industry_txt() -> None:
             path.write_text(cleaned, encoding="utf-8")
 
 
-def _clear_tv_subdir_exports(out_dir: Path, *folder_names: str) -> None:
-    """Remove stale per-sector .txt from prior runs (same-day folder reuse)."""
-    for name in folder_names:
-        sub = out_dir / name
-        if not sub.is_dir():
-            continue
-        for p in sub.glob("*.txt"):
-            p.unlink(missing_ok=True)
-
-
 def export_tv_watchlists(
     results: list[dict],
     meta: dict[str, dict],
     out_dir: Path,
 ) -> Path:
-    """Export TV import files with sector / industry grouping."""
+    """Export single TV import comma list (Sector / Industry grouped)."""
+    import importlib
+    importlib.reload(screener)
     today = (
         out_dir.name.removeprefix("FirstScreen_")
         if out_dir.name.startswith("FirstScreen_")
         else date.today().isoformat()
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    hit_results = [r for r in results if r.get("pass")]
+    if not hit_results:
+        return out_dir
+
     tv_cache: dict[str, str] = {}
-    symbols = [r["symbol"] for r in results]
+    symbols = [r["symbol"] for r in hit_results]
     screener.prefetch_tv_exchanges(symbols, meta, tv_cache)
-    rows = [enrich_fs_row(r, meta, tv_cache) for r in results]
-    hit_rows = [x for x in rows if x["on_list"]]
-    w_only = [x for x in hit_rows if x["pass_tf"] == "W1"]
-    d_only = [x for x in hit_rows if x["pass_tf"] == "D1"]
-    both = [x for x in hit_rows if x["pass_tf"] == "W1+D1"]
-
-    readme = out_dir / "README_TV_IMPORT.txt"
-    readme.write_text(
-        "First Screen — TradingView Watchlist Import\n"
-        "==========================================\n\n"
-        "格式：### Sector — Industry 標題 + 每行 EXCHANGE:SYMBOL\n"
-        "所有 *_comma.txt / *_lines.txt 都含 Sector / Industry 分組。\n\n"
-        "Files:\n"
-        "  FirstScreen_YYYY-MM-DD_comma.txt — 入選全部（建議 import 呢個）\n"
-        "  hits_comma.txt                   — 同上\n"
-        "  hits_by_sector_industry.txt      — 同上（備份檔名）\n"
-        "  hits_by_sector/*.txt             — 按 Sector 分檔\n"
-        "  hits_by_sector_industry/*.txt    — 按 Sector+Industry 分檔\n"
-        "  W1_only_comma.txt / D1_only_comma.txt — 子集\n"
-        "  classified_full.csv              — 完整表（含 Sector / Industry）\n\n"
-        "Import: TV Watchlist → ⋯ → Import list → 揀 FirstScreen_YYYY-MM-DD_comma.txt\n",
-        encoding="utf-8",
-    )
-
-    screener._export_tv_group(hit_rows, out_dir, "hits")
-    screener._export_tv_group(w_only, out_dir, "W1_only")
-    screener._export_tv_group(d_only, out_dir, "D1_only")
-    screener._export_tv_group(both, out_dir, "W1_D1_both")
-
-    _clear_tv_subdir_exports(out_dir, "hits_by_sector", "hits_by_sector_industry")
-    screener._export_rows_by_sector(hit_rows, out_dir, folder_name="hits_by_sector")
+    hit_rows = [enrich_fs_row(r, meta, tv_cache) for r in hit_results]
     dated_comma = out_dir / f"FirstScreen_{today}_comma.txt"
-    shortcut = REPORTS / f"FirstScreen_{today}_hits_comma.txt"
-    if hit_rows:
-        screener.write_tv_import_txt(hit_rows, dated_comma, use_tv_ticker=True)
-        screener.write_tv_import_txt(hit_rows, shortcut, use_tv_ticker=True)
-        screener.write_tv_import_txt(
-            hit_rows,
-            out_dir / "hits_by_sector_industry.txt",
-            use_tv_ticker=True,
-        )
-    screener._export_rows_by_sector(hit_rows, out_dir, folder_name="hits_by_sector")
-    screener._export_rows_by_sector_industry(hit_rows, out_dir, folder_name="hits_by_sector_industry")
-
-    fields = [
-        "symbol", "tv_ticker", "sector", "industry", "description",
-        "grade", "pass_tf", "on_list", "w1_score", "d1_score", "score", "price", "note",
-    ]
-    csv_path = out_dir / "classified_full.csv"
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for x in sorted(rows, key=lambda r: (-int(r["on_list"]), -int(r["score"]), r["symbol"])):
-            w.writerow({k: x.get(k, "") for k in fields})
-
-    by_sector: dict[str, list[dict]] = {}
-    for x in hit_rows:
-        sec = x["sector"] or "Unknown"
-        by_sector.setdefault(sec, []).append(x)
-    for sec, sec_rows in sorted(by_sector.items()):
-        sec_csv = out_dir / "classified" / f"hits_{screener._safe_filename(sec)}.csv"
-        sec_csv.parent.mkdir(exist_ok=True)
-        with sec_csv.open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            w.writeheader()
-            for x in sorted(sec_rows, key=lambda r: -int(r["score"])):
-                w.writerow({k: x.get(k, "") for k in fields})
-
-    _repair_legacy_sector_industry_txt()
+    screener.write_tv_import_txt(hit_rows, dated_comma, use_tv_ticker=True)
     return out_dir
 
 
@@ -1175,15 +1149,25 @@ def tv_import_options_for_date(day: str | None = None) -> list[tuple[str, str]]:
 ProgressCallback = Callable[[int, int, str], None]
 
 
+def _skip_reason_key(exc: Exception) -> str:
+    name = type(exc).__name__
+    msg = str(exc).strip()
+    if name == "TypeError" and msg:
+        return f"{name}: {msg[:100]}"
+    return name
+
+
 @dataclass
 class FirstScreenRunResult:
     ok: bool
     error: str = ""
+    warning: str = ""
     logs: list[str] = field(default_factory=list)
     source_csv: Path | None = None
     analyzed: int = 0
     total_symbols: int = 0
     skipped: int = 0
+    skip_reasons: dict[str, int] = field(default_factory=dict)
     hit_count: int = 0
     hit_symbols: list[str] = field(default_factory=list)
     hit_rows: list[dict] = field(default_factory=list)
@@ -1210,15 +1194,27 @@ def run_screen(
 
     symbols = screener.read_screener_symbols(csv_path)
     meta = screener.read_screener_meta(csv_path)
+    csv_total = len(symbols)
     if limit > 0:
         symbols = symbols[:limit]
     total = len(symbols)
-    logs.append(f"Symbols: {total} (W1+D1 each)")
+    logs.append(f"CSV symbols: {csv_total}; run queue: {total} (W1+D1 each)")
+    if not total:
+        msg = "CSV 內冇有效 Symbol（請確認有 Symbol 欄同至少一隻股票）"
+        logs.append(msg)
+        return FirstScreenRunResult(
+            ok=False,
+            error=msg,
+            logs=logs,
+            source_csv=csv_path,
+            total_symbols=csv_total,
+        )
     if filters:
         logs.append(f"Filters: {filters.summary()}")
 
     results: list[dict] = []
     skipped = 0
+    skip_reasons: dict[str, int] = {}
     for i, sym in enumerate(symbols, 1):
         if progress_callback:
             progress_callback(i, total, sym)
@@ -1229,51 +1225,80 @@ def run_screen(
                 results.append(row)
             else:
                 skipped += 1
-                logs.append(f"  skip {sym}: no bars")
+                reason = "no W1/D1 bars"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                logs.append(f"  skip {sym}: {reason}")
         except Exception as e:
             skipped += 1
+            reason = _skip_reason_key(e)
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             logs.append(f"  skip {sym}: {e}")
         if delay > 0:
             time.sleep(delay)
+
+    warning = ""
+    if not results and total > 0:
+        top = sorted(skip_reasons.items(), key=lambda x: -x[1])[:3]
+        detail = " · ".join(f"{k}×{v}" for k, v in top) if top else "全部 skip"
+        hint = (
+            "code/API 唔一致—restart Streamlit 令 first_screen + analyze_tv_csv 一齊 reload"
+            if any(str(k).startswith("TypeError") for k in skip_reasons)
+            else "可能 yfinance 暫時失效或網絡問題"
+        )
+        warning = f"0 隻成功分析（CSV {csv_total} 隻）— {detail}；{hint}"
+        logs.append(f"WARNING: {warning}")
+    elif skipped and skipped >= max(10, total // 4):
+        warning = (
+            f"跳過 {skipped}/{total} 隻（CSV 共 {csv_total} 隻）— "
+            "部分 symbol 無法取得 W1/D1 數據"
+        )
+        logs.append(f"WARNING: {warning}")
 
     out_dir = get_fs_reports_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = csv_path.stem
     today = date.today().isoformat()
-    summary_path = out_dir / f"FIRST_SCREEN_{stem}_{today}_summary.md"
-    json_path = out_dir / f"FIRST_SCREEN_{stem}_{today}_results.json"
+    flat_tag = f"_flat{max(1, int(filters.ma_flat_min_bars))}" if filters else "_flat1"
+    summary_path = out_dir / f"FIRST_SCREEN_{stem}_{today}{flat_tag}_summary.md"
 
-    summary_md = format_batch_summary(results, csv_path.name, filters=filters)
+    summary_md = format_batch_summary(
+        results,
+        csv_path.name,
+        filters=filters,
+        total_symbols=csv_total,
+        skipped=skipped,
+        skip_reasons=skip_reasons,
+        warning=warning,
+    )
     summary_path.write_text(summary_md, encoding="utf-8")
-    json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
     export_dir = out_dir / f"FirstScreen_{today}"
     export_tv_watchlists(results, meta, export_dir)
-    dated_hits_path = out_dir / f"FirstScreen_{today}_hits_comma.txt"
+    comma_path = export_dir / f"FirstScreen_{today}_comma.txt"
     watchlist_name = f"FirstScreen_{today}"
 
     hits = [r["symbol"] for r in results if r.get("pass")]
     hit_rows = build_hit_rows(results)
-    logs.append(f"TV export: {export_dir}")
-    if dated_hits_path.is_file():
-        logs.append(f"Dated list: {dated_hits_path.name}")
+    logs.append(f"TV import: {comma_path.name}" if comma_path.is_file() else "TV import: (0 hits)")
     logs.append(f"Done: {len(results)} analyzed, {len(hits)} on list, {skipped} skipped")
     logs.append(f"Summary: {summary_path}")
 
     return FirstScreenRunResult(
         ok=True,
         logs=logs,
+        warning=warning,
         source_csv=csv_path,
         analyzed=len(results),
-        total_symbols=total,
+        total_symbols=csv_total,
         skipped=skipped,
+        skip_reasons=skip_reasons,
         hit_count=len(hits),
         hit_symbols=hits,
         hit_rows=hit_rows,
         summary_path=summary_path,
-        json_path=json_path,
+        json_path=None,
         export_dir=export_dir,
-        dated_hits_path=dated_hits_path if dated_hits_path.is_file() else None,
+        dated_hits_path=comma_path if comma_path.is_file() else None,
         watchlist_name=watchlist_name,
         summary_md=summary_md,
         filters=filters,

@@ -1815,6 +1815,34 @@ def at_key_resistance(bar: dict, sr: dict, mom: dict, tol: float = 0.035) -> boo
     return any(near_price_level(hi, lv, tol) or near_price_level(c, lv, tol) for lv in levels if lv)
 
 
+def _slope_at(s10: list[float], i: int, slope_bars: int = 5) -> float:
+    if i < slope_bars:
+        return 0.0
+    base = s10[i - slope_bars]
+    return (s10[i] - base) / base if base > 0 else 0.0
+
+
+def ma_has_min_flat_bars(
+    s10: list[float],
+    anchor_i: int,
+    *,
+    min_bars: int,
+    slope_bars: int = 5,
+    flat_slope: float = 0.008,
+) -> bool:
+    """True when ≥min_bars consecutive bars near anchor have 10MA slope ≥ -flat_slope."""
+    if min_bars <= 1:
+        return True
+    n = len(s10)
+    for start in range(max(0, anchor_i - 8), min(anchor_i + 1, n)):
+        end = start + min_bars
+        if end > n:
+            continue
+        if all(_slope_at(s10, j, slope_bars) >= -flat_slope for j in range(start, end)):
+            return True
+    return False
+
+
 def detect_ma_inflection_up(
     s10: list[float],
     s20: list[float],
@@ -1822,8 +1850,11 @@ def detect_ma_inflection_up(
     e20: list[float],
     close: float,
     *,
+    closes: list[float] | None = None,
     lookback: int = 35,
     relax_now_rising: bool = False,
+    min_flat_bars: int = 1,
+    flat_slope: float = 0.008,
 ) -> tuple[bool, str]:
     """
     10MA 由跌/平 → 再向上（搵轉好位，容許 V 底未過 50MA）。
@@ -1855,15 +1886,15 @@ def detect_ma_inflection_up(
         trough_i >= 5 and s10[trough_i - 1] <= s10[trough_i - 5] * 1.008
     )
 
-    recovered = s10[-1] > trough_val * 1.01
-    if relax_now_rising:
-        # W1：U 底剛轉上時 6-bar slope 常被前段高位 drag；睇短斜率 + 自谷回升
-        now_rising = s10[-1] > s10[-3] and s10[-1] > trough_val * 1.008
-    else:
-        now_rising = s10[-1] > s10[-3] and s10[-3] >= s10[-6] * 0.995
+    # V 型早期拗上：min_flat_bars=1 時容許「價先彈、10MA 未完全跟」。
+    v_early_mode = min_flat_bars <= 1
+    rec_mult = 1.006 if v_early_mode else 1.01
+    ma_recovered = s10[-1] > trough_val * rec_mult
 
     s20_floor = min(s20[-8:-1])
     s20_turning = s20[-1] > s20[-3] or s20[-1] > s20_floor * 1.001
+    if v_early_mode and not s20_turning:
+        s20_turning = s20[-1] >= s20[-2] * 0.999 and s20[-1] > s20_floor * 0.998
 
     s50_turning = s50[-1] > s50[-8]
     above_10 = close > s10[-1]
@@ -1871,11 +1902,49 @@ def detect_ma_inflection_up(
     # V 底：企穩 10MA 就得；升勢確認：再過 EMA20
     price_ok = above_10 and (above_e20 or close > s50[-1] * 0.92)
 
+    ma_turning = s10[-1] > s10[-3] and s10[-1] >= s10[-2] * 0.998
+    price_led_v = False
+    if (
+        v_early_mode
+        and closes
+        and len(closes) == n
+        and 0 <= trough_i < n
+        and had_pullback
+        and above_10
+        and ma_turning
+        and s20_turning
+        and price_ok
+    ):
+        trough_close = closes[trough_i]
+        if trough_close > 0:
+            price_led_v = (
+                close > trough_close * 1.03
+                and s10[-1] >= trough_val * 0.992
+            )
+
+    recovered = ma_recovered or price_led_v
+    if relax_now_rising:
+        # W1：U 底剛轉上時 6-bar slope 常被前段高位 drag；睇短斜率 + 自谷回升
+        now_rising = s10[-1] > s10[-3] and (s10[-1] > trough_val * 1.008 or price_led_v)
+    elif v_early_mode:
+        now_rising = (
+            s10[-1] > s10[-2]
+            and s10[-2] >= s10[-4] * 0.996
+            and (s10[-1] > trough_val * 1.004 or price_led_v)
+        )
+    else:
+        now_rising = s10[-1] > s10[-3] and s10[-3] >= s10[-6] * 0.995
+
     # 早期 V 底 50MA 仲喺上面 — 只要求 10MA 追緊 20MA
     stacking = s10[-1] >= s20[-1] * 0.94 or (above_10 and s10[-1] > trough_val * 1.02)
+    if v_early_mode and price_led_v and not stacking:
+        stacking = above_10 and ma_turning
 
     days_since_trough = n - 1 - trough_i
     in_window = days_since_trough <= lookback
+    flat_ok = ma_has_min_flat_bars(
+        s10, trough_i, min_bars=min_flat_bars, flat_slope=flat_slope,
+    )
 
     if (
         had_pullback
@@ -1885,11 +1954,18 @@ def detect_ma_inflection_up(
         and stacking
         and price_ok
         and in_window
+        and flat_ok
     ):
-        detail = (
-            f"10MA 谷 {trough_val:.2f}→{s10[-1]:.2f}（+{(s10[-1]/trough_val-1)*100:.0f}%）；"
-            f"20MA 轉上；{'50MA 轉上' if s50_turning else '50MA 追趕中'}"
-        )
+        if price_led_v and not ma_recovered:
+            detail = (
+                f"V底價先彈（收${close:.2f} vs 10MA {s10[-1]:.2f}）；"
+                f"10MA 轉向中；{'50MA 轉上' if s50_turning else '50MA 追趕中'}"
+            )
+        else:
+            detail = (
+                f"10MA 谷 {trough_val:.2f}→{s10[-1]:.2f}（+{(s10[-1]/trough_val-1)*100:.0f}%）；"
+                f"20MA 轉上；{'50MA 轉上' if s50_turning else '50MA 追趕中'}"
+            )
         return True, detail
 
     gaps = []
@@ -1907,6 +1983,8 @@ def detect_ma_inflection_up(
         gaps.append("收市未企穩 10MA/EMA20")
     if not in_window:
         gaps.append("轉好窗口已過")
+    if not flat_ok:
+        gaps.append(f"10MA 轉平不足{min_flat_bars}根")
     return False, "；".join(gaps) if gaps else "條件未齊"
 
 

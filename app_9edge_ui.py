@@ -162,6 +162,28 @@ def resolve_screener_csv(
     return default_csv
 
 
+def screener_csv_symbol_count(path: Path | None) -> int:
+    """How many unique symbols are in a TradingView screener CSV."""
+    if not path or not path.is_file():
+        return 0
+    try:
+        return len(_screener().read_screener_symbols(path))
+    except Exception:
+        return 0
+
+
+def format_fs_csv_caption(path: Path | None, *, limit: int = 0) -> str:
+    """Human-readable CSV path + symbol count for First Screen / Screener UI."""
+    if not path or not path.is_file():
+        return "未選擇 Screener CSV"
+    n = screener_csv_symbol_count(path)
+    if n <= 0:
+        return f"`{path.name}` — ⚠️ CSV 內冇有效 Symbol"
+    pending = n if limit <= 0 else min(n, limit)
+    tail = f"待分析 **{pending}** 隻" if limit <= 0 else f"試跑 **{pending}** / {n} 隻"
+    return f"`{path.name}` — CSV **{n}** 隻 · {tail}"
+
+
 def render_tv_watchlist_import(
     *,
     key_prefix: str,
@@ -322,11 +344,7 @@ def render_fs_tv_import_block(*, key_prefix: str, default_dir: Path | None = Non
         default_export_dir=picked,
         export_dirs=dirs,
         file_options=fs.tv_import_options_for_date(day),
-        default_list_file=(
-            f"FirstScreen_{day}_comma.txt"
-            if (picked / f"FirstScreen_{day}_comma.txt").is_file()
-            else "hits_comma.txt"
-        ),
+        default_list_file=f"FirstScreen_{day}_comma.txt",
         title="**📥 First Screen → TV Watchlist**",
         watchlist_hint=(
             f"建議喺 TV **新建 watchlist：`FirstScreen_{day}`**，"
@@ -337,17 +355,37 @@ def render_fs_tv_import_block(*, key_prefix: str, default_dir: Path | None = Non
 
 def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> None:
     """First Screen 完成後：入選數、開資料夾、TV import。"""
+    csv_total = result.total_symbols or (result.analyzed + result.skipped)
+    if getattr(result, "warning", ""):
+        st.warning(result.warning)
+    elif result.analyzed == 0 and csv_total > 0:
+        st.error(
+            f"⚠️ CSV 有 **{csv_total}** 隻，但 **0 隻成功分析**。"
+            " 請睇下方 log / 摘要內「跳過原因」。"
+        )
+    elif result.skipped and result.analyzed < csv_total:
+        st.info(
+            f"已分析 **{result.analyzed}** / CSV **{csv_total}** 隻"
+            f"（跳過 **{result.skipped}**）"
+        )
+
     st.success(
-        f"✅ First Screen 完成 — 入選 **{result.hit_count}** / {result.analyzed} 隻"
-        + (f"（跳過 {result.skipped}）" if result.skipped else "")
+        f"✅ First Screen 完成 — 入選 **{result.hit_count}** 隻"
+        f"（已分析 {result.analyzed} / CSV {csv_total}"
+        + (f"，跳過 {result.skipped}" if result.skipped else "")
+        + "）"
     )
-    c1, c2, c3 = st.columns(3)
+    if getattr(result, "filters", None):
+        st.caption(f"**本次條件**：{result.filters.summary()}")
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("入選", result.hit_count)
+        st.metric("CSV 總數", csv_total)
     with c2:
-        st.metric("分析", result.analyzed)
+        st.metric("已分析", result.analyzed)
     with c3:
         st.metric("跳過", result.skipped)
+    with c4:
+        st.metric("入選", result.hit_count)
 
     if result.watchlist_name:
         st.caption(
@@ -358,26 +396,6 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
         st.caption(f"入選條件：**{result.filters.summary()}**")
 
     hit_rows = getattr(result, "hit_rows", None) or []
-    if not hit_rows and result.export_dir:
-        classified = result.export_dir / "classified_full.csv"
-        if classified.is_file():
-            import csv as _csv
-            with classified.open(encoding="utf-8-sig", newline="") as f:
-                hit_rows = [
-                    {
-                        "symbol": row.get("symbol", ""),
-                        "sector": row.get("sector", ""),
-                        "industry": row.get("industry", ""),
-                        "price": row.get("price", ""),
-                        "pass_tf": row.get("pass_tf", ""),
-                        "grade": row.get("grade", ""),
-                        "w1": f"{row.get('w1_score', 0)}/3",
-                        "d1": f"{row.get('d1_score', 0)}/3",
-                        "note": (row.get("note") or "")[:80],
-                    }
-                    for row in _csv.DictReader(f)
-                    if str(row.get("on_list", "")).lower() in ("true", "1", "yes")
-                ]
     if hit_rows:
         st.markdown("**✅ 入選名單（Sector / Industry）**")
         st.dataframe(
@@ -396,15 +414,6 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
                 "note": st.column_config.TextColumn("備註", width="large"),
             },
         )
-        classified = (result.export_dir / "classified_full.csv") if result.export_dir else None
-        if classified and classified.is_file():
-            st.download_button(
-                "⬇️ 下載 classified_full.csv（含 Sector / Industry）",
-                data=classified.read_bytes(),
-                file_name=classified.name,
-                mime="text/csv",
-                key=f"{key_prefix}_dl_classified",
-            )
 
     open_target = (
         result.export_dir
@@ -422,7 +431,7 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
     with bc2:
         dated = result.dated_hits_path
         if dated and dated.is_file() and st.button(
-            "📄 開日期清單檔",
+            "📄 開 comma 清單",
             use_container_width=True,
             key=f"{key_prefix}_open_dated",
             disabled=not dated,
@@ -551,6 +560,7 @@ def build_fs_filters(
     d_bull: bool,
     req_counter: bool,
     req_leading: bool,
+    ma_flat_bars: int = 1,
 ):
     return fs_mod.FirstScreenFilters(
         w1=fs_mod.TfFilter(
@@ -571,6 +581,7 @@ def build_fs_filters(
         ),
         require_counter_trend=req_counter,
         require_leading_ma=req_leading,
+        ma_flat_min_bars=max(1, int(ma_flat_bars)),
     )
 
 
@@ -639,7 +650,7 @@ def run_fs_single_backtest(
     fwd = data.get("forward") or {}
     pk = fwd.get("peak_60d")
     pk_s = f" · 60d高 {pk:+.1f}%" if pk is not None else ""
-    flash = f"{title}{pk_s} — 報告已載入下方 **📄 報告區**"
+    flash = f"{title}{pk_s} — 報告已載入 **📄 報告** 頁"
     _fs_bt_publish_report(
         md=md,
         title=title,
@@ -727,7 +738,7 @@ def run_fs_backtest_scan(
     )
     flash = (
         f"FS 區間掃描 **{sym}**：{len(rows)} 日符合 · "
-        f"最佳 60d高 {best_pk}（{best.as_of}）— 報告已載入下方 **📄 報告區**"
+        f"最佳 60d高 {best_pk}（{best.as_of}）— 報告已載入 **📄 報告** 頁"
     )
     _fs_bt_publish_report(
         md=md,
@@ -789,7 +800,7 @@ def run_fs_csv_backtest(
     title = f"FS CSV @ {as_of} — {len(rows)} 入選"
     top_pk = rows[0].peak_60d if rows else None
     pk_s = f" · Top 60d高 {top_pk:+.1f}% ({rows[0].symbol})" if rows and top_pk is not None else ""
-    flash = f"{title}{pk_s} — 報告已載入下方 **📄 報告區**"
+    flash = f"{title}{pk_s} — 報告已載入 **📄 報告** 頁"
     _fs_bt_publish_report(
         md=md,
         title=title,
@@ -808,7 +819,7 @@ def render_fs_backtest_panel(
     """First Screen 回測：單股掃描 + CSV 單日 batch（含事後升幅）。"""
     if flash := st.session_state.get("fs_bt_flash"):
         st.success(flash)
-        st.caption("⬇️ 向下捲到 **📄 報告區** 睇完整 Markdown；表格亦喺下面。")
+        st.caption("⬇️ 左側揀 **📄 報告** 睇完整 Markdown；表格亦喺下面。")
         bt_path = st.session_state.get("fs_bt_report_path")
         if bt_path:
             bp = Path(bt_path)
@@ -831,7 +842,7 @@ def render_fs_backtest_panel(
     with st.expander("📅 First Screen 回測（驗證爆升）", expanded=bt_expanded):
         st.caption(
             "只用 as-of 日及之前 K 線；**+20/40/60 日**同 **60 日內最高** 係事後驗證。"
-            " 用上面 W/D/RS 勾選做篩選條件。跑完會自動載入 **📄 報告區**。"
+            " 用上面 W/D/RS 勾選做篩選條件。跑完會載入 **📄 報告** 頁。"
         )
         if err := st.session_state.get("last_error"):
             st.warning(err)
@@ -973,7 +984,7 @@ def render_first_screen_section(
     if is_cloud_environment():
         st.caption(
             "☁️ Cloud 模式：上載 Screener CSV 即可跑初篩 + 回測；"
-            "報告喺下方 **📄 報告區**（可 Download）。TV MCP 匯入要本機。"
+            "報告喺 **📄 報告** 頁（可 Download）。TV MCP 匯入要本機。"
         )
     st.caption(
         "W/D 子項可單獨 tick；都冇勾 = **W 或 D 3/3**。"
@@ -1022,9 +1033,16 @@ def render_first_screen_section(
     with fc_r2:
         st.checkbox("② 領先 MA vs SPY", key="fs_req_leading")
 
+    st.number_input(
+        "MA 轉平最少 bar（MA轉上）",
+        min_value=1,
+        max_value=8,
+        step=1,
+        key="fs_ma_flat_bars",
+        help="10MA 轉上：轉平要連續幾根 K（5-bar slope ≥ -0.8%）。預設 1 = 而家；改 3 = 要橫行 3 根先算轉上。",
+    )
+
     default_csv = find_latest_screener_csv()
-    if default_csv:
-        st.caption(f"偵測到 CSV：`{default_csv.name}`")
     c_up, c_path = st.columns([1, 2])
     with c_up:
         fs_upload = st.file_uploader(
@@ -1045,6 +1063,12 @@ def render_first_screen_section(
         path_text=st.session_state.get("screener_path", ""),
         default_csv=default_csv,
     )
+    fs_limit_val = int(st.session_state.get("fs_limit", 0))
+    st.caption(format_fs_csv_caption(fs_csv_path, limit=fs_limit_val))
+    if fs_csv_path and fs_csv_path.is_file() and str(fs_csv_path) != str(default_csv or ""):
+        st.caption(f"使用路徑：`{fs_csv_path}`")
+    elif default_csv and not fs_csv_path:
+        st.caption(f"預設最新 CSV：`{default_csv.name}`")
 
     st.number_input(
         "試跑上限（0=全部）",
@@ -1070,9 +1094,14 @@ def render_first_screen_section(
         d_bull=st.session_state["fs_d_bull"],
         req_counter=st.session_state["fs_req_counter"],
         req_leading=st.session_state["fs_req_leading"],
+        ma_flat_bars=int(st.session_state.get("fs_ma_flat_bars", 1)),
     )
     if fs_filters.has_tf_filters() or fs_filters.needs_rs():
         st.caption(f"**目前條件**：{fs_filters.summary()}")
+    st.caption(
+        f"**MA 轉平 bar 本次值**：`{int(st.session_state.get('fs_ma_flat_bars', 1))}`"
+        "（改完要再撳 **開始 First Screen** 先會重跑；唔係睇舊報告）"
+    )
 
     if st.button("🌱 開始 First Screen", type="primary", use_container_width=True, key="fs_run"):
         if not fs_csv_path:
@@ -1080,11 +1109,34 @@ def render_first_screen_section(
         elif not fs_csv_path.exists():
             st.session_state["last_error"] = f"搵唔到 CSV：{fs_csv_path}"
         else:
-            run_local_first_screen(
-                fs_csv_path,
-                limit=int(st.session_state.get("fs_limit", 0)),
-                filters=fs_filters,
-            )
+            sym_n = screener_csv_symbol_count(fs_csv_path)
+            if sym_n <= 0:
+                st.session_state["last_error"] = (
+                    f"CSV 內冇有效 Symbol：{fs_csv_path.name}（請確認 Symbol 欄）"
+                )
+            else:
+                run_local_first_screen(
+                    fs_csv_path,
+                    limit=int(st.session_state.get("fs_limit", 0)),
+                    filters=build_fs_filters(
+                        fs_mod,
+                        w_en=st.session_state["fs_w_en"],
+                        w_ma=st.session_state["fs_w_ma"],
+                        w_pb=st.session_state["fs_w_pb"],
+                        w_down=st.session_state["fs_w_down"],
+                        w_up=st.session_state["fs_w_up"],
+                        w_bull=st.session_state["fs_w_bull"],
+                        d_en=st.session_state["fs_d_en"],
+                        d_ma=st.session_state["fs_d_ma"],
+                        d_pb=st.session_state["fs_d_pb"],
+                        d_down=st.session_state["fs_d_down"],
+                        d_up=st.session_state["fs_d_up"],
+                        d_bull=st.session_state["fs_d_bull"],
+                        req_counter=st.session_state["fs_req_counter"],
+                        req_leading=st.session_state["fs_req_leading"],
+                        ma_flat_bars=int(st.session_state.get("fs_ma_flat_bars", 1)),
+                    ),
+                )
 
     render_fs_backtest_panel(
         fs_filters=fs_filters,
@@ -1093,8 +1145,18 @@ def render_first_screen_section(
 
     if fs_prev := st.session_state.get("last_first_screen_result"):
         if isinstance(fs_prev, fs_mod.FirstScreenRunResult) and fs_prev.ok:
-            with st.expander("🌱 上次 First Screen 結果", expanded=False):
-                render_first_screen_results(fs_prev, key_prefix="fs_prev")
+            cur_flat = int(st.session_state.get("fs_ma_flat_bars", 1))
+            prev_flat = (
+                int(fs_prev.filters.ma_flat_min_bars)
+                if getattr(fs_prev, "filters", None)
+                else None
+            )
+            if prev_flat is not None and prev_flat != cur_flat:
+                st.warning(
+                    f"下方係 **上次結果（MA轉平={prev_flat}bar）**；"
+                    f"你而家設 **{cur_flat}bar** — 要撳開始先會更新。"
+                )
+            render_first_screen_results(fs_prev, key_prefix="fs_prev")
     elif fs_mod.list_export_dirs():
         with st.expander("📥 TV Watchlist 匯入", expanded=False):
             render_fs_tv_import_block(key_prefix="fs_tv")
@@ -1108,40 +1170,66 @@ def run_local_first_screen(
     limit: int = 0,
     filters: "FirstScreenFilters | None" = None,
 ) -> None:
+    import importlib
+    import analyze_tv_csv
+    import first_screen as fs_mod
+    import screen_screener_csv
+    importlib.reload(analyze_tv_csv)
+    importlib.reload(screen_screener_csv)
+    fs_mod = importlib.reload(fs_mod)
+
     progress = st.progress(0.0, text="準備 First Screen…")
     status = st.empty()
 
     def on_progress(i: int, total: int, sym: str) -> None:
-        progress.progress(i / total, text=f"[{i}/{total}] {sym}")
-        status.caption(f"初篩分析緊 **{sym}**…")
+        pct = (i / total) if total else 0.0
+        progress.progress(pct, text=f"[{i}/{total}] {sym}")
+        status.caption(f"初篩分析緊 **{sym}**…（{i}/{total}）")
 
-    with st.spinner(f"First Screen 跑緊（{csv_path.name}）…"):
-        result = _first_screen().run_screen(
-            csv_path,
-            limit=limit,
-            progress_callback=on_progress,
-            filters=filters,
-        )
+    try:
+        with st.spinner(f"First Screen 跑緊（{csv_path.name}）…"):
+            result = fs_mod.run_screen(
+                csv_path,
+                limit=limit,
+                progress_callback=on_progress,
+                filters=filters,
+            )
+    except Exception as e:
+        progress.empty()
+        status.empty()
+        st.session_state["last_error"] = f"First Screen 失敗：{e}"
+        append_logs([f"ERROR First Screen: {e}"])
+        return
 
     progress.empty()
     status.empty()
     append_logs(result.logs)
     st.session_state["last_first_screen_result"] = result
 
-    if result.ok:
-        st.session_state.pop("last_error", None)
-        title = report_label(result.summary_path) if result.summary_path else "First Screen 摘要"
-        set_view_report(
-            result.summary_path,
-            result.summary_md,
-            title,
-            analyzed=True,
-            symbol="FIRST_SCREEN",
-        )
-        st.toast(f"✅ 初篩通過 {result.hit_count} 隻", icon="✅")
-        st.rerun()
-    else:
+    if not result.ok:
         st.session_state["last_error"] = result.error
+        return
+
+    if result.warning:
+        st.session_state["last_error"] = None
+        append_logs([f"WARNING: {result.warning}"])
+
+    st.session_state.pop("last_error", None)
+    title = report_label(result.summary_path) if result.summary_path else "First Screen 摘要"
+    set_view_report(
+        result.summary_path,
+        result.summary_md,
+        title,
+        analyzed=True,
+        symbol="FIRST_SCREEN",
+    )
+    flat_n = int(filters.ma_flat_min_bars) if filters else 1
+    toast = (
+        f"✅ 初篩通過 {result.hit_count} 隻"
+        f"（已分析 {result.analyzed}/{result.total_symbols}，MA轉平={flat_n}bar）"
+    )
+    st.toast(toast, icon="✅")
+    st.rerun()
 
 
 st.set_page_config(
@@ -1160,9 +1248,16 @@ UI_PREF_KEYS: tuple[str, ...] = (
     "fs_w_en", "fs_w_ma", "fs_w_pb", "fs_w_down", "fs_w_up", "fs_w_bull",
     "fs_d_en", "fs_d_ma", "fs_d_pb", "fs_d_down", "fs_d_up", "fs_d_bull",
     "fs_req_counter", "fs_req_leading",
+    "fs_ma_flat_bars",
     "fs_limit", "fs_csv_bt_limit", "screener_path",
-    "tools_other_visible",
+    "main_page",
 )
+
+MAIN_PAGE_LABELS: dict[str, str] = {
+    "fs": "🌱 First Screen",
+    "tools": "🛠️ 其他工具",
+    "report": "📄 報告",
+}
 
 UI_PREF_DEFAULTS: dict[str, bool | int | str] = {
     "fs_w_en": False,
@@ -1179,10 +1274,11 @@ UI_PREF_DEFAULTS: dict[str, bool | int | str] = {
     "fs_d_bull": False,
     "fs_req_counter": False,
     "fs_req_leading": False,
+    "fs_ma_flat_bars": 1,
     "fs_limit": 0,
     "fs_csv_bt_limit": 50,
     "screener_path": "",
-    "tools_other_visible": False,
+    "main_page": "fs",
 }
 
 
@@ -1365,6 +1461,9 @@ def set_view_report(
     st.session_state["view_report_path"] = str(path) if path else ""
     if analyzed:
         st.session_state["just_analyzed"] = True
+        if symbol != "FIRST_SCREEN":
+            # Defer page switch until before nav widget instantiation.
+            st.session_state["_pending_main_page"] = "report"
     if add_to_library:
         register_report(title=title, md=md, path=path, symbol=symbol)
 
@@ -2256,23 +2355,60 @@ def render_tools_expander(
         )
 
 
+def render_left_nav() -> str:
+    """Fixed left rail — switch page without scrolling past reports."""
+    if pending := st.session_state.pop("_pending_main_page", None):
+        if pending in MAIN_PAGE_LABELS:
+            st.session_state["main_page"] = pending
+    ensure_ui_pref("main_page")
+    cur = st.session_state.get("main_page", "fs")
+    if cur not in MAIN_PAGE_LABELS:
+        cur = "fs"
+        st.session_state["main_page"] = cur
+    st.markdown("##### 功能")
+    page = st.radio(
+        "功能",
+        list(MAIN_PAGE_LABELS.keys()),
+        format_func=lambda k: MAIN_PAGE_LABELS[k],
+        key="main_page",
+        label_visibility="collapsed",
+    )
+    st.caption("切換頁面唔使捲到底")
+    return page
+
+
+def render_execution_log() -> None:
+    if logs := st.session_state.get("last_logs"):
+        with st.expander("📋 執行 log", expanded=bool(st.session_state.get("last_error"))):
+            st.code("\n".join(logs))
+
+
 def main_cloud() -> None:
     ensure_all_ui_prefs()
-    render_first_screen_section()
-
-    render_cloud_toolbar()
-
-    with st.sidebar:
-        render_cloud_sidebar()
 
     if err := st.session_state.get("last_error"):
         st.error(err)
 
-    has_report = render_report_zone(
-        empty_hint="🌱 **First Screen** 上載 CSV 撳開始；或 Sidebar **報告庫** 載入摘要。",
-    )
-    if not has_report:
-        st.info("🌱 上載 Screener CSV 跑 **First Screen**，或 Sidebar 載入已有報告。")
+    nav_col, body_col = st.columns([1, 5], gap="medium")
+    with nav_col:
+        page = render_left_nav()
+    with body_col:
+        if page == "fs":
+            render_first_screen_section()
+        elif page == "tools":
+            render_cloud_toolbar()
+        else:
+            has_report = render_report_zone(
+                empty_hint="🌱 **First Screen** 上載 CSV 撳開始；或 Sidebar **報告庫** 載入摘要。",
+            )
+            if not has_report:
+                st.info("🌱 上載 Screener CSV 跑 **First Screen**，或 Sidebar 載入已有報告。")
+        render_execution_log()
+
+    with st.sidebar:
+        render_cloud_sidebar()
+
+    persist_ui_prefs()
 
 
 def main_local(
@@ -2291,33 +2427,29 @@ def main_local(
     if err := st.session_state.get("last_error"):
         st.error(err)
 
-    render_first_screen_section(screener_upload=uploaded_csvs)
-
-    has_report = render_report_zone()
-
-    ensure_ui_pref("tools_other_visible")
-    if st.toggle(
-        "🛠️ 顯示其他工具（TV / 9-edge / Screener / 回測）",
-        key="tools_other_visible",
-    ):
-        render_other_local_tools(
-            connected,
-            chart_sym,
-            symbol_override,
-            csv_sym,
-            uploaded_csvs,
-            uploaded_zip,
-            key_prefix="tools",
-        )
+    nav_col, body_col = st.columns([1, 5], gap="medium")
+    with nav_col:
+        page = render_left_nav()
+    with body_col:
+        if page == "fs":
+            render_first_screen_section(screener_upload=uploaded_csvs)
+        elif page == "tools":
+            render_other_local_tools(
+                connected,
+                chart_sym,
+                symbol_override,
+                csv_sym,
+                uploaded_csvs,
+                uploaded_zip,
+                key_prefix="tools",
+            )
+        else:
+            has_report = render_report_zone()
+            if not has_report:
+                st.info("撳 **🌱 First Screen** 跑初篩，或 Sidebar **報告庫** 載入摘要。")
+        render_execution_log()
 
     persist_ui_prefs()
-
-    if logs := st.session_state.get("last_logs"):
-        with st.expander("📋 執行 log", expanded=bool(st.session_state.get("last_error"))):
-            st.code("\n".join(logs))
-
-    if not has_report:
-        st.info("撳 **🌱 開始 First Screen** 或 Sidebar **報告庫** 載入摘要。")
 
 
 def main() -> None:

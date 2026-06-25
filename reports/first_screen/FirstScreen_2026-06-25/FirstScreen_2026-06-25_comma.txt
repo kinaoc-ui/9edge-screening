@@ -1,0 +1,512 @@
+### Commercial services — Miscellaneous commercial services
+
+NYSE:XYZ
+NYSE:CRL
+NASDAQ:RELY
+NASDAQ:ICLR
+NYSE:CPAY
+NYSE:GEO
+NYSE:KLAR
+
+### Commercial services — Personnel services
+
+NYSE:RHI
+
+### Consumer durables — Electronics/Appliances
+
+NYSE:SN
+
+### Consumer durables — Homebuilding
+
+NASDAQ:CVCO
+NYSE:DHI
+NYSE:PHM
+NYSE:KBH
+NYSE:SKY
+NYSE:TOL
+
+### Consumer durables — Motor vehicles
+
+NYSE:HOG
+
+### Consumer durables — Tools & hardware
+
+NYSE:SWK
+
+### Consumer non-durables — Apparel/Footwear
+
+NYSE:RL
+NASDAQ:CROX
+
+### Consumer non-durables — Beverages: alcoholic
+
+NYSE:BUD
+NYSE:ABEV
+
+### Consumer non-durables — Beverages: non-alcoholic
+
+NYSE:PRMB
+NASDAQ:KDP
+NASDAQ:MNST
+
+### Consumer non-durables — Food: meat/fish/dairy
+
+NYSE:HRL
+
+### Consumer non-durables — Food: specialty/candy
+
+NASDAQ:COCO
+NYSE:SJM
+
+### Consumer non-durables — Tobacco
+
+NYSE:MO
+
+### Consumer services — Broadcasting
+
+NASDAQ:SIRI
+
+### Consumer services — Casinos/Gaming
+
+NASDAQ:PENN
+
+### Consumer services — Hotels/Resorts/Cruise lines
+
+NYSE:RCL
+NYSE:H
+NYSE:VIK
+NYSE:CHH
+NYSE:HLT
+NASDAQ:MAR
+
+### Consumer services — Movies/Entertainment
+
+NYSE:CNK
+
+### Consumer services — Other consumer services
+
+NYSE:VVV
+NYSE:LTH
+
+### Consumer services — Restaurants
+
+NYSE:BROS
+NYSE:ARMK
+NASDAQ:SBUX
+
+### Distribution services — Wholesale distributors
+
+NYSE:AIT
+NYSE:GWW
+NYSE:MSM
+
+### Electronic technology — Aerospace & defense
+
+NYSE:GE
+NYSE:CR
+NYSE:TDG
+NYSE:HEI
+NASDAQ:ATRO
+NYSE:HXL
+
+### Electronic technology — Computer processing hardware
+
+NYSE:DELL
+NASDAQ:ZBRA
+
+### Electronic technology — Electronic components
+
+NYSE:APH
+NASDAQ:TTMI
+
+### Electronic technology — Electronic equipment/Instruments
+
+NYSE:SXI
+NYSE:RAL
+
+### Electronic technology — Electronic production equipment
+
+NYSE:BE
+
+### Electronic technology — Semiconductors
+
+NASDAQ:AMD
+NASDAQ:ALAB
+NASDAQ:DIOD
+NASDAQ:POWI
+NASDAQ:RUN
+NASDAQ:FORM
+NASDAQ:GFS
+NASDAQ:INTC
+NASDAQ:QRVO
+NASDAQ:SIMO
+NASDAQ:TSEM
+NASDAQ:ASML
+NYSE:COHR
+NYSE:STM
+
+### Finance — Finance/Rental/Leasing
+
+NYSE:SYF
+NYSE:ALLY
+NYSE:BFH
+NASDAQ:CACC
+NYSE:ENVA
+NASDAQ:UPST
+NYSE:URI
+NYSE:STT
+
+### Finance — Investment banks/Brokers
+
+NYSE:BCS
+NYSE:EVR
+NYSE:GS
+NASDAQ:HOOD
+NASDAQ:SNEX
+NYSE:BNY
+
+### Finance — Investment managers
+
+NYSE:MS
+NASDAQ:NTRS
+NYSE:UBS
+NYSE:AMG
+NYSE:BEN
+NASDAQ:PFG
+
+### Finance — Life/Health insurance
+
+NYSE:PRU
+
+### Finance — Major banks
+
+NYSE:ASB
+NASDAQ:DAVE
+NYSE:BAC
+NYSE:C
+NYSE:FNB
+NYSE:JPM
+NYSE:KEY
+NYSE:RF
+NYSE:SAN
+NASDAQ:UMBF
+NYSE:USB
+NASDAQ:ZION
+NYSE:CFG
+NYSE:FLG
+NASDAQ:ONB
+NASDAQ:VLY
+NYSE:BMO
+NYSE:MUFG
+
+### Finance — Multi-line insurance
+
+NASDAQ:CINF
+NYSE:GL
+NYSE:MET
+NYSE:UNM
+
+### Finance — Property/Casualty insurance
+
+NYSE:THG
+
+### Finance — Real estate development
+
+NYSE:MTH
+
+### Finance — Real estate investment trusts
+
+NYSE:IRM
+NYSE:HR
+NYSE:KIM
+NYSE:AMH
+NYSE:BXP
+NYSE:KRC
+NYSE:SLG
+NYSE:VNO
+NASDAQ:EQIX
+NYSE:ESS
+NYSE:JAN
+NYSE:PEB
+
+### Finance — Regional banks
+
+NASDAQ:BPOP
+NASDAQ:FCNCA
+NYSE:FITB
+NASDAQ:COLB
+
+### Health services — Hospital/Nursing management
+
+NYSE:CHE
+
+### Health services — Managed health care
+
+NYSE:OSCR
+NYSE:UNH
+NYSE:CNC
+NYSE:MOH
+NYSE:HUM
+
+### Health services — Medical/Nursing services
+
+NYSE:DVA
+NYSE:HIMS
+
+### Health technology — Biotechnology
+
+NASDAQ:APGE
+NASDAQ:ARWR
+NASDAQ:BEAM
+NASDAQ:IMVT
+NASDAQ:NTRA
+NASDAQ:KRYS
+NASDAQ:KYMR
+NASDAQ:MRNA
+NASDAQ:NTLA
+NASDAQ:SRRK
+NASDAQ:DNTH
+NASDAQ:QURE
+NASDAQ:CRSP
+
+### Health technology — Medical specialties
+
+NYSE:WST
+NYSE:RVTY
+NYSE:BAX
+NASDAQ:LIVN
+NASDAQ:LNTH
+NYSE:HAE
+
+### Health technology — Pharmaceuticals: generic
+
+NYSE:TEVA
+
+### Health technology — Pharmaceuticals: major
+
+NYSE:NVO
+NASDAQ:RYTM
+NASDAQ:CYTK
+NASDAQ:INDV
+NASDAQ:LGND
+NASDAQ:PTCT
+NASDAQ:RGEN
+NASDAQ:TGTX
+NASDAQ:TVTX
+NYSE:ABBV
+NASDAQ:ALKS
+NASDAQ:CORT
+NYSE:LLY
+NASDAQ:MIRM
+NASDAQ:PTGX
+NASDAQ:ROIV
+NASDAQ:VKTX
+NASDAQ:CNTA
+NASDAQ:EXEL
+NYSE:MANE
+NASDAQ:ORKA
+NASDAQ:RPRX
+
+### Health technology — Pharmaceuticals: other
+
+NASDAQ:RVMD
+
+### Industrial services — Engineering & construction
+
+NYSE:ECG
+NASDAQ:ROAD
+NYSE:AGX
+NASDAQ:STRL
+NYSE:DY
+NASDAQ:VSEC
+
+### Industrial services — Environmental services
+
+NASDAQ:CWST
+
+### Industrial services — Oilfield services/Equipment
+
+NYSE:KGS
+NYSE:SEI
+
+### Miscellaneous — Miscellaneous
+
+NASDAQ:HUT
+
+### Non-energy minerals — Construction materials
+
+NYSE:EXP
+NYSE:ACA
+NYSE:JHX
+
+### Non-energy minerals — Forest products
+
+NYSE:TREX
+
+### Non-energy minerals — Other metals/Minerals
+
+NYSE:ATI
+NYSE:CRS
+
+### Process industries — Chemicals: major diversified
+
+NYSE:DD
+NASDAQ:SOLS
+
+### Process industries — Chemicals: specialty
+
+NYSE:NEU
+
+### Process industries — Containers/Packaging
+
+NYSE:OC
+NYSE:SW
+
+### Process industries — Industrial specialties
+
+NYSE:AXTA
+NYSE:PPG
+NYSE:RPM
+
+### Producer manufacturing — Auto parts: OEM
+
+NYSE:CMI
+NASDAQ:GTX
+
+### Producer manufacturing — Building products
+
+NYSE:MAS
+NYSE:MHK
+NYSE:FBIN
+NYSE:SSD
+
+### Producer manufacturing — Electrical products
+
+NYSE:GNRC
+NYSE:GEV
+NASDAQ:POWL
+NYSE:ROK
+NYSE:RRX
+
+### Producer manufacturing — Industrial conglomerates
+
+NYSE:MMM
+
+### Producer manufacturing — Industrial machinery
+
+NYSE:LII
+NASDAQ:MIDD
+NYSE:TT
+NYSE:CARR
+NASDAQ:AAON
+NASDAQ:ACLS
+NYSE:IEX
+NYSE:NPO
+NASDAQ:NWL
+NASDAQ:MKSI
+NYSE:WTS
+
+### Producer manufacturing — Metal fabrication
+
+NYSE:VMI
+
+### Producer manufacturing — Miscellaneous manufacturing
+
+NYSE:YETI
+
+### Producer manufacturing — Trucks/Construction/Farm machinery
+
+NYSE:TEX
+
+### Retail trade — Apparel/Footwear retail
+
+NYSE:BOOT
+NYSE:VSXY
+
+### Retail trade — Department stores
+
+NYSE:KSS
+NYSE:M
+
+### Retail trade — Drugstore chains
+
+NYSE:CVS
+
+### Retail trade — Food retail
+
+NASDAQ:SFM
+
+### Retail trade — Internet retail
+
+NYSE:ETSY
+NYSE:SE
+
+### Retail trade — Specialty stores
+
+NYSE:DKS
+NYSE:TGT
+NYSE:W
+NYSE:WSM
+NYSE:LAD
+NYSE:RH
+NYSE:KMX
+
+### Technology services — Data processing services
+
+NASDAQ:CIFR
+NASDAQ:CLSK
+NASDAQ:MARA
+
+### Technology services — Information technology services
+
+NASDAQ:RIOT
+NYSE:RBRK
+NASDAQ:SAIC
+NASDAQ:XMTR
+
+### Technology services — Internet software/Services
+
+NYSE:RBA
+NASDAQ:MMYT
+NASDAQ:MRX
+
+### Technology services — Packaged software
+
+NASDAQ:AFRM
+NASDAQ:DUOL
+NASDAQ:NBIS
+NASDAQ:VRNS
+NASDAQ:CORZ
+NASDAQ:CVLT
+NASDAQ:DDOG
+NASDAQ:FFIV
+NASDAQ:QLYS
+NASDAQ:SEZL
+NYSE:ESTC
+NASDAQ:NAVN
+
+### Transportation — Air freight/Couriers
+
+NASDAQ:CART
+NYSE:EXPD
+
+### Transportation — Airlines
+
+NYSE:ALK
+NASDAQ:JBLU
+NASDAQ:UAL
+NASDAQ:ALGT
+NYSE:DAL
+NYSE:LUV
+
+### Transportation — Other transportation
+
+NYSE:PFGC
+
+### Transportation — Railroads
+
+NASDAQ:CSX
+
+### Utilities — Alternative power generation
+
+NASDAQ:TLN

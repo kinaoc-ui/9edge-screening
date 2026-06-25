@@ -1,7 +1,0 @@
-﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
-IREN,NASDAQ:IREN,Technology services,Data processing services,IREN Limited,A,W1,True,3,2,5,56.87,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
-INOD,NASDAQ:INOD,Technology services,Data processing services,Innodata Inc.,A,W1,True,3,2,5,90.68,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
-VOYG,NYSE:VOYG,Technology services,Information technology services,"Voyager Technologies, Inc.",A,W1,True,3,2,5,34.57,W1 3/3：MA轉上；量價配合 | D1 2/3：量價配合
-ROKU,NASDAQ:ROKU,Technology services,Packaged software,"Roku, Inc.",A,D1,True,0,3,3,135.2,W1 0/3：未達 | D1 3/3：MA轉上；量價配合
-APLD,NASDAQ:APLD,Technology services,Data processing services,Applied Digital Corporation,A,W1,True,3,0,3,45.2,W1 3/3：MA轉上；量價配合 | D1 0/3：未達
-XMTR,NASDAQ:XMTR,Technology services,Information technology services,"Xometry, Inc.",A,W1,True,3,0,3,91.56,W1 3/3：MA轉上；量價配合 | D1 0/3：未達

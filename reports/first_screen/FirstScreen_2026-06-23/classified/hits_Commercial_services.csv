@@ -1,2 +1,0 @@
-﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
-XYZ,NYSE:XYZ,Commercial services,Miscellaneous commercial services,"Block, Inc.",A,D1,True,1,3,4,71.96,W1 1/3：股跌日量低 | D1 3/3：MA轉上；量價配合；大陽2根 | 跌市反向：3M 17.6% vs SPY 12.9% | 領先MA：股 $71.96 [10上/20上/50上] 3/3 vs SPY $738.17 [10下/20下/50上] 1/3

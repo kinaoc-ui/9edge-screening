@@ -1,4 +1,0 @@
-﻿symbol,tv_ticker,sector,industry,description,grade,pass_tf,on_list,w1_score,d1_score,score,price,note
-VSXY,NYSE:VSXY,Retail trade,Apparel/Footwear retail,Victorias Secret & Co.,A,W1,True,3,1,4,80.07,W1 3/3：MA轉上；量價配合；大陽1根 | D1 1/3：股升日量高 | 跌市反向：3M 76.4% vs SPY 12.9% | 領先MA：股 $80.07 [10上/20上/50上] 3/3 vs SPY $738.13 [10下/20下/50上] 1/3
-WSM,NYSE:WSM,Retail trade,Specialty stores,"Williams-Sonoma, Inc.",A,W1,True,2,1,3,225.41,W1 2/3：MA轉上；股跌日量低；大陽2根 | D1 1/3：股跌日量低；大陽2根 | 跌市反向：3M 23.2% vs SPY 12.9% | 領先MA：股 $225.41 [10上/20上/50上] 3/3 vs SPY $737.98 [10下/20下/50上] 1/3
-M,NYSE:M,Retail trade,Department stores,Macy's Inc,A,W1,True,2,1,3,24.05,W1 2/3：MA轉上；股跌日量低；大陽2根 | D1 1/3：股升日量高；大陽3根 | 跌市反向：3M 34.4% vs SPY 12.9% | 領先MA：股 $24.05 [10下/20上/50上] 2/3 vs SPY $738.13 [10下/20下/50上] 1/3
