@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import argparse
 import math
+import shutil
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -44,8 +45,36 @@ def get_fs_reports_dir() -> Path:
     _CLOUD_FS_REPORTS.mkdir(parents=True, exist_ok=True)
     return _CLOUD_FS_REPORTS
 
+def _fs_run_stamp() -> tuple[str, str, str]:
+    """Return (day ISO, time HHMMSS, human label YYYY-MM-DD HH:MM:SS)."""
+    now = datetime.now()
+    day = now.date().isoformat()
+    run_time = now.strftime("%H%M%S")
+    label = now.strftime("%Y-%m-%d %H:%M:%S")
+    return day, run_time, label
+
+
+def _purge_same_day_first_screen_outputs(out_dir: Path, day: str) -> None:
+    """Remove prior First Screen outputs for this calendar day (same-day rerun replaces)."""
+    if not out_dir.is_dir():
+        return
+    for p in list(out_dir.iterdir()):
+        name = p.name
+        if name.startswith(f"FirstScreen_{day}_") or name.startswith(f"FIRST_SCREEN_{day}_"):
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+            continue
+        # legacy: folder or files without run time
+        if name == f"FirstScreen_{day}" and p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        elif name.startswith("FIRST_SCREEN_") and f"_{day}" in name:
+            p.unlink(missing_ok=True)
+
+
 FS_TV_IMPORT_OPTIONS: list[tuple[str, str]] = [
-    ("FirstScreen_{date}_comma.txt", "入選全部（含 Sector / Industry）"),
+    ("FirstScreen_{date}_{time}_comma.txt", "入選全部（含 Sector / Industry）"),
 ]
 
 MIN_BARS_D = 60
@@ -765,8 +794,20 @@ def apply_filters(
         out["grade"] = "C"
         out["pass_tf"] = ""
 
-    notes = [n for n in [combo.get("note"), tf_note if not tf_ok else "", *rs_bits] if n]
-    out["note"] = " | ".join(notes) if notes else "未達"
+    verdict = _format_list_verdict(
+        on_list=on_list,
+        tf_ok=tf_ok,
+        w_flt=w_flt,
+        d_flt=d_flt,
+        counter_ok=counter_ok,
+        leading_ok=leading_ok,
+        filters=filters,
+        tf_note=tf_note,
+        rs_bits=rs_bits,
+    )
+    detail = " · ".join(n for n in [combo.get("note"), *(rs_bits if on_list else [])] if n)
+    out["list_verdict"] = verdict
+    out["note"] = f"{verdict} · {detail}" if detail else verdict
     if rs:
         out["rs"] = rs
     return out
@@ -813,8 +854,50 @@ def combine_wd(w1: dict, d1: dict) -> dict:
         "d1_score": d_sc,
         "w1_pass": w_pass,
         "d1_pass": d_pass,
-        "note": " | ".join(parts) if parts else "W/D 未達 3/3",
+        "note": " · ".join(parts) if parts else "W/D 未達 3/3",
     }
+
+
+def _format_list_verdict(
+    *,
+    on_list: bool,
+    tf_ok: bool,
+    w_flt: bool | None,
+    d_flt: bool | None,
+    counter_ok: bool,
+    leading_ok: bool,
+    filters: FirstScreenFilters | None,
+    tf_note: str,
+    rs_bits: list[str],
+) -> str:
+    """One-line pass/fail reason for backtest table / UI."""
+    if on_list:
+        gate = tf_note or "W/D"
+        return f"✅入選·{gate}"
+
+    fails: list[str] = []
+    if filters and filters.has_tf_filters():
+        if w_flt is not None and d_flt is not None and not tf_ok:
+            fails.append(f"W1勾選{'✅' if w_flt else '❌'} D1勾選{'✅' if d_flt else '❌'}")
+        elif w_flt is not None and not w_flt:
+            fails.append("W1勾選❌")
+        elif d_flt is not None and not d_flt:
+            fails.append("D1勾選❌")
+    elif not tf_ok:
+        fails.append("W/D 未達 3/3")
+
+    if filters and filters.require_counter_trend and not counter_ok:
+        ct = next((b for b in rs_bits if "跑贏" in b or "反向" in b or "未跑" in b), "反向走勢未過")
+        fails.append(f"①反向走勢❌（{ct}）")
+    if filters and filters.require_leading_ma and not leading_ok:
+        lm = next((b for b in rs_bits if "領先" in b), "領先MA未過")
+        fails.append(f"②領先MA❌（{lm}）")
+    if filters and filters.needs_rs() and not rs_bits and (not counter_ok or not leading_ok):
+        fails.append("RS 數據不足")
+
+    if not fails:
+        fails.append(tf_note or "條件未過")
+    return f"❌未入選：{'；'.join(fails)}"
 
 
 def score_symbol(
@@ -954,23 +1037,118 @@ def _tf_icons(tf: dict) -> tuple[str, str, str]:
     return icon("ma_turn"), icon("down_vol"), icon("up_vol")
 
 
+def find_previous_screener_csv(current: Path) -> Path | None:
+    """Most recent screener CSV in the same folder, excluding *current*."""
+    folder = current.parent
+    if not folder.is_dir() or not current.is_file():
+        return None
+    cur = current.resolve()
+    cur_mtime = current.stat().st_mtime
+    candidates = [
+        p for p in folder.glob("*.csv")
+        if p.is_file() and p.resolve() != cur
+    ]
+    if not candidates:
+        return None
+    older = [p for p in candidates if p.stat().st_mtime < cur_mtime]
+    pool = older if older else candidates
+    return max(pool, key=lambda p: p.stat().st_mtime)
+
+
+def compare_screener_csv_universe(current: Path) -> dict | None:
+    """Symbol set diff vs the previous TV screener export in the same folder."""
+    prev = find_previous_screener_csv(current)
+    if not prev:
+        return None
+    cur_syms = set(screener.read_screener_symbols(current))
+    prev_syms = set(screener.read_screener_symbols(prev))
+    return {
+        "current_name": current.name,
+        "prev_name": prev.name,
+        "cur_count": len(cur_syms),
+        "prev_count": len(prev_syms),
+        "added": sorted(cur_syms - prev_syms),
+        "removed": sorted(prev_syms - cur_syms),
+    }
+
+
+def _format_symbol_list_md(symbols: list[str], *, max_show: int = 120) -> str:
+    if not symbols:
+        return "—"
+    if len(symbols) <= max_show:
+        return ", ".join(f"`{s}`" for s in symbols)
+    head = ", ".join(f"`{s}`" for s in symbols[:max_show])
+    return f"{head} … 及其他 **{len(symbols) - max_show}** 隻"
+
+
+def format_csv_universe_section(diff: dict | None) -> list[str]:
+    """Markdown lines: CSV vs previous export + scope reminder."""
+    lines = [
+        "> **掃描範圍**：First Screen **只分析今次 CSV 內嘅 symbol**。"
+        "某股 backtest 入選但 **唔喺 CSV** → bulk list **唔會出現**（系統冇掃過佢）。",
+        "",
+    ]
+    if not diff:
+        lines += [
+            "> 同資料夾內搵唔到上一個 TV screener export 可對比。",
+            "",
+        ]
+        return lines
+
+    added = diff["added"]
+    removed = diff["removed"]
+    lines += [
+        "## 📋 Screener CSV 與上一個 TV export 比較",
+        "",
+        f"- **今次**：`{diff['current_name']}` — **{diff['cur_count']}** 隻",
+        f"- **對比**：`{diff['prev_name']}` — **{diff['prev_count']}** 隻",
+        f"- **淨變化**：{diff['cur_count'] - diff['prev_count']:+d} 隻",
+        "",
+    ]
+    if not added and not removed:
+        lines += [
+            "> 與上一 export **symbol 清單相同**（數量差異可能來自 CSV 內重複或無效列）。",
+            "",
+        ]
+        return lines
+
+    if added:
+        lines += [
+            f"### ➕ 今次 CSV 新增（{len(added)}）— 上一 export 冇、今次先入 pool",
+            "",
+            _format_symbol_list_md(added),
+            "",
+        ]
+    if removed:
+        lines += [
+            f"### ➖ 今次 CSV 移除（{len(removed)}）— 上一 export 有、今次唔再掃",
+            "",
+            _format_symbol_list_md(removed),
+            "",
+        ]
+    return lines
+
+
 def format_batch_summary(
     results: list[dict],
     source_name: str,
     *,
+    source_csv: Path | None = None,
     filters: FirstScreenFilters | None = None,
     total_symbols: int = 0,
     skipped: int = 0,
     skip_reasons: dict[str, int] | None = None,
     warning: str = "",
+    run_label: str = "",
 ) -> str:
     today = date.today().isoformat()
     hits = [r for r in results if r.get("pass")]
     b_list = [r for r in results if r.get("grade") == "B"]
     csv_total = total_symbols or (len(results) + skipped)
+    when = run_label or today
 
     lines = [
-        f"# First Screen 初篩（W1 + D1）— {today}",
+        f"# First Screen 初篩（W1 + D1）— {when}",
         "",
         f"**來源**：{source_name}",
         "",
@@ -986,6 +1164,8 @@ def format_batch_summary(
         "> W1（近 12 週）+ D1（近 20 日）量價初篩；勾選嘅 optional 條件必須一齊過。",
         "",
     ]
+    csv_diff = compare_screener_csv_universe(source_csv) if source_csv else None
+    lines += format_csv_universe_section(csv_diff)
     if warning:
         lines += [f"> ⚠️ **{warning}**", ""]
     if skip_reasons:
@@ -1099,33 +1279,42 @@ def _repair_legacy_sector_industry_txt() -> None:
 def export_tv_watchlists(
     results: list[dict],
     meta: dict[str, dict],
-    out_dir: Path,
+    comma_path: Path,
 ) -> Path:
     """Export single TV import comma list (Sector / Industry grouped)."""
     import importlib
     importlib.reload(screener)
-    today = (
-        out_dir.name.removeprefix("FirstScreen_")
-        if out_dir.name.startswith("FirstScreen_")
-        else date.today().isoformat()
-    )
-    out_dir.mkdir(parents=True, exist_ok=True)
+    comma_path.parent.mkdir(parents=True, exist_ok=True)
     hit_results = [r for r in results if r.get("pass")]
     if not hit_results:
-        return out_dir
+        return comma_path.parent
 
     tv_cache: dict[str, str] = {}
     symbols = [r["symbol"] for r in hit_results]
     screener.prefetch_tv_exchanges(symbols, meta, tv_cache)
     hit_rows = [enrich_fs_row(r, meta, tv_cache) for r in hit_results]
-    dated_comma = out_dir / f"FirstScreen_{today}_comma.txt"
-    screener.write_tv_import_txt(hit_rows, dated_comma, use_tv_ticker=True)
-    return out_dir
+    screener.write_tv_import_txt(hit_rows, comma_path, use_tv_ticker=True)
+    return comma_path.parent
+
+
+def list_fs_comma_exports() -> list[Path]:
+    """Newest-first First Screen comma.txt files (flat under reports/first_screen)."""
+    if not REPORTS.is_dir():
+        return []
+    files = [
+        p for p in REPORTS.glob("FirstScreen_*_*_comma.txt")
+        if p.is_file()
+    ]
+    legacy = [p for p in REPORTS.glob("FirstScreen_*/FirstScreen_*_comma.txt") if p.is_file()]
+    return sorted({*files, *legacy}, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def list_export_dirs() -> list[Path]:
-    """Newest-first First Screen export folders."""
+    """Newest-first First Screen export locations (flat files → reports root)."""
     _repair_legacy_sector_industry_txt()
+    commas = list_fs_comma_exports()
+    if commas:
+        return [REPORTS]
     if not REPORTS.is_dir():
         return []
     return sorted(
@@ -1138,10 +1327,23 @@ def list_export_dirs() -> list[Path]:
     )
 
 
+def tv_import_options_for_run(day: str, run_time: str) -> list[tuple[str, str]]:
+    return [
+        (f"FirstScreen_{day}_{run_time}_comma.txt", "入選全部（含 Sector / Industry）"),
+    ]
+
+
 def tv_import_options_for_date(day: str | None = None) -> list[tuple[str, str]]:
     day = day or date.today().isoformat()
+    commas = [p for p in list_fs_comma_exports() if f"FirstScreen_{day}_" in p.name]
+    if commas:
+        name = commas[0].name
+        # FirstScreen_YYYY-MM-DD_HHMMSS_comma.txt
+        parts = name.removeprefix("FirstScreen_").removesuffix("_comma.txt").split("_", 1)
+        if len(parts) == 2:
+            return tv_import_options_for_run(parts[0], parts[1])
     return [
-        (fname.replace("{date}", day), label.replace("{date}", day))
+        (fname.replace("{date}", day).replace("{time}", "000000"), label.replace("{date}", day))
         for fname, label in FS_TV_IMPORT_OPTIONS
     ]
 
@@ -1176,6 +1378,8 @@ class FirstScreenRunResult:
     export_dir: Path | None = None
     dated_hits_path: Path | None = None
     watchlist_name: str = ""
+    run_day: str = ""
+    run_time: str = ""
     summary_md: str = ""
     filters: FirstScreenFilters | None = None
 
@@ -1256,26 +1460,27 @@ def run_screen(
 
     out_dir = get_fs_reports_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = csv_path.stem
-    today = date.today().isoformat()
-    flat_tag = f"_flat{max(1, int(filters.ma_flat_min_bars))}" if filters else "_flat1"
-    summary_path = out_dir / f"FIRST_SCREEN_{stem}_{today}{flat_tag}_summary.md"
+    run_day, run_time, run_label = _fs_run_stamp()
+    _purge_same_day_first_screen_outputs(out_dir, run_day)
+
+    comma_path = out_dir / f"FirstScreen_{run_day}_{run_time}_comma.txt"
+    summary_path = out_dir / f"FIRST_SCREEN_{run_day}_{run_time}_summary.md"
 
     summary_md = format_batch_summary(
         results,
         csv_path.name,
+        source_csv=csv_path,
         filters=filters,
         total_symbols=csv_total,
         skipped=skipped,
         skip_reasons=skip_reasons,
         warning=warning,
+        run_label=run_label,
     )
     summary_path.write_text(summary_md, encoding="utf-8")
 
-    export_dir = out_dir / f"FirstScreen_{today}"
-    export_tv_watchlists(results, meta, export_dir)
-    comma_path = export_dir / f"FirstScreen_{today}_comma.txt"
-    watchlist_name = f"FirstScreen_{today}"
+    export_dir = export_tv_watchlists(results, meta, comma_path)
+    watchlist_name = f"FirstScreen_{run_day}_{run_time}"
 
     hits = [r["symbol"] for r in results if r.get("pass")]
     hit_rows = build_hit_rows(results)
@@ -1300,6 +1505,8 @@ def run_screen(
         export_dir=export_dir,
         dated_hits_path=comma_path if comma_path.is_file() else None,
         watchlist_name=watchlist_name,
+        run_day=run_day,
+        run_time=run_time,
         summary_md=summary_md,
         filters=filters,
     )

@@ -49,8 +49,52 @@ TV_EXCHANGE_MAP = {
     "BTS": "NYSE",
 }
 
+# TradingView screener export — English + 繁中/简中 header aliases
+SCREENER_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "Symbol": ("symbol", "商品", "代码", "代碼", "ticker"),
+    "Description": ("description", "描述", "说明", "說明"),
+    "Sector": ("sector", "部門", "部门", "板块", "板塊"),
+    "Industry": ("industry", "產業", "产业"),
+    "Price": ("price", "價格", "价格"),
+    "Exchange": ("exchange", "交易所", "上市交易所"),
+}
+
+
+def _canonical_screener_field(header: str) -> str | None:
+    h = (header or "").strip()
+    if not h:
+        return None
+    hl = h.lower()
+    for canonical, aliases in SCREENER_FIELD_ALIASES.items():
+        if hl == canonical.lower():
+            return canonical
+        for alias in aliases:
+            if h == alias or hl == alias.lower():
+                return canonical
+    return None
+
+
+def _normalize_screener_row(row: dict) -> dict:
+    out: dict[str, str] = {}
+    for key, val in row.items():
+        canonical = _canonical_screener_field(key)
+        if canonical and canonical not in out:
+            out[canonical] = (val or "").strip()
+    if not out.get("Symbol"):
+        # TV 繁中 export：第一欄通常就係 ticker（商品）
+        for val in row.values():
+            sym = (val or "").strip().upper()
+            if sym and re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,14}", sym):
+                out["Symbol"] = sym
+                break
+    return out
+
 
 def _exchange_from_row(row: dict) -> str:
+    norm = _normalize_screener_row(row) if "Symbol" not in row else row
+    ex = (norm.get("Exchange") or "").strip()
+    if ex:
+        return ex
     for key, val in row.items():
         kn = key.strip().lower().replace(" ", "_")
         if kn in ("exchange", "primary_exchange", "listing_exchange"):
@@ -154,7 +198,7 @@ def prefetch_tv_exchanges(
 
 def read_screener_rows(path: Path) -> list[dict]:
     with path.open(encoding="utf-8-sig", newline="") as f:
-        return list(csv.DictReader(f))
+        return [_normalize_screener_row(row) for row in csv.DictReader(f)]
 
 
 def read_screener_symbols(path: Path) -> list[str]:

@@ -9,7 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -54,11 +54,15 @@ _FIRST_SCREEN: object | None = None
 _TV: object | None = None
 
 
-def _screener():
+def _screener(*, fresh: bool = False):
     """Lazy-load screener (heavy analyze_tv_csv import) — faster Cloud cold start."""
     global _SCREENER
+    import importlib
+    import screen_screener_csv as sc_mod
     if _SCREENER is None:
-        import screen_screener_csv as _SCREENER
+        _SCREENER = sc_mod
+    if fresh or not hasattr(_SCREENER, "SCREENER_FIELD_ALIASES"):
+        _SCREENER = importlib.reload(sc_mod)
     return _SCREENER
 
 
@@ -102,6 +106,24 @@ def find_latest_screener_csv():
 
 def launch_tradingview_debug():
     return _tv().launch_tradingview_debug()
+
+
+def ensure_cdp_connected(**kwargs) -> tuple[bool, str]:
+    if is_cloud_environment():
+        return False, "Cloud 模式唔支援 TV"
+    return _tv().ensure_cdp_connected(**kwargs)
+
+
+def auto_connect_tv_if_needed() -> None:
+    """Once per session: launch TV and wait for CDP if not connected."""
+    if cdp_available() or st.session_state.get("_tv_auto_connect_done"):
+        return
+    st.session_state["_tv_auto_connect_done"] = True
+    with st.spinner("正在自動連接 TradingView（CDP 9222）…"):
+        ok, msg = ensure_cdp_connected()
+    st.session_state["_tv_auto_connect_msg"] = msg
+    if ok:
+        st.toast(msg, icon="📺")
 
 
 def launch_rrr():
@@ -150,7 +172,7 @@ def resolve_screener_csv(
         if is_cloud_environment():
             target = get_csv_dir() / uploaded.name
         else:
-            target = ROOT / "screener" / uploaded.name
+            target = _APP_ROOT / "screener" / uploaded.name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(uploaded.getvalue())
         return target
@@ -285,14 +307,20 @@ def render_tv_watchlist_import(
             else:
                 st.session_state["last_error"] = msg
     with c4:
-        import_disabled = not symbols or not cdp_available()
+        import_disabled = not symbols
         if st.button(
             "📥 加入 TV Watchlist",
             use_container_width=True,
             disabled=import_disabled,
             key=f"{key_prefix}_tv_import",
-            help="經 MCP 逐隻加入而家 active 嘅 watchlist（Pro 手動 import 仍可用下載檔）",
+            help="經 MCP 逐隻加入而家 active 嘅 watchlist（未連 TV 會自動連）",
         ):
+            if not cdp_available():
+                with st.spinner("正在連接 TV…"):
+                    ok, msg = ensure_cdp_connected()
+                if not ok:
+                    st.session_state["last_error"] = msg
+                    return
             progress = st.progress(0.0, text="匯入 TV watchlist…")
             status = st.empty()
 
@@ -318,7 +346,7 @@ def render_tv_watchlist_import(
                 st.session_state["last_error"] = errors[0] if errors else "匯入失敗"
 
     if not cdp_available():
-        st.caption("⚠️ CDP 未連線 — 用「下載 .txt」→ TV Watchlist → ⋯ → Import list")
+        st.caption("⚠️ CDP 未連線 — 撳「加入 TV Watchlist」會自動連，或用「下載 .txt」手動 import")
 
 
 def _day_from_export_dir(export_dir: Path) -> str:
@@ -330,7 +358,12 @@ def _day_from_export_dir(export_dir: Path) -> str:
     return date.today().isoformat()
 
 
-def render_fs_tv_import_block(*, key_prefix: str, default_dir: Path | None = None) -> None:
+def render_fs_tv_import_block(
+    *,
+    key_prefix: str,
+    default_dir: Path | None = None,
+    default_comma: Path | None = None,
+) -> None:
     """Shared TV import UI for First Screen exports (same controls as 9-edge screener)."""
     fs = _first_screen()
     dirs = fs.list_export_dirs()
@@ -338,17 +371,28 @@ def render_fs_tv_import_block(*, key_prefix: str, default_dir: Path | None = Non
         st.caption("跑完 First Screen 後，呢度會出現 TV 匯入（下載 / 開資料夾 / 加入 Watchlist）。")
         return
     picked = default_dir if default_dir and default_dir in dirs else dirs[0]
-    day = _day_from_export_dir(picked)
+    if default_comma and default_comma.is_file():
+        comma_name = default_comma.name
+        if default_comma.parent == picked or default_comma.parent.name.startswith("FirstScreen_"):
+            picked = default_comma.parent if default_comma.parent.is_dir() else picked
+    else:
+        latest = fs.list_fs_comma_exports()
+        if latest:
+            comma_name = latest[0].name
+            picked = latest[0].parent
+        else:
+            comma_name = f"FirstScreen_{date.today().isoformat()}_000000_comma.txt"
+    day = comma_name.removeprefix("FirstScreen_").split("_")[0] if comma_name.startswith("FirstScreen_") else date.today().isoformat()
     render_tv_watchlist_import(
         key_prefix=key_prefix,
         default_export_dir=picked,
         export_dirs=dirs,
         file_options=fs.tv_import_options_for_date(day),
-        default_list_file=f"FirstScreen_{day}_comma.txt",
+        default_list_file=comma_name,
         title="**📥 First Screen → TV Watchlist**",
         watchlist_hint=(
-            f"建議喺 TV **新建 watchlist：`FirstScreen_{day}`**，"
-            f"再 Import **`FirstScreen_{day}_comma.txt`**（內有 ### Sector — Industry 分組）。"
+            f"建議喺 TV **新建 watchlist**（例如 `{comma_name.removesuffix('_comma.txt')}`），"
+            f"再 Import **`{comma_name}`**（內有 ### Sector — Industry 分組）。"
         ),
     )
 
@@ -387,10 +431,10 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
     with c4:
         st.metric("入選", result.hit_count)
 
-    if result.watchlist_name:
+    if result.watchlist_name and result.dated_hits_path:
         st.caption(
             f"建議 TV watchlist 名：**{result.watchlist_name}**"
-            "（新建 list → Import `FirstScreen_YYYY-MM-DD_comma.txt`）"
+            f"（Import `{result.dated_hits_path.name}`）"
         )
     if getattr(result, "filters", None):
         st.caption(f"入選條件：**{result.filters.summary()}**")
@@ -460,6 +504,7 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
     render_fs_tv_import_block(
         key_prefix=f"{key_prefix}_tv",
         default_dir=result.export_dir,
+        default_comma=result.dated_hits_path,
     )
 
 
@@ -843,11 +888,19 @@ def render_fs_backtest_panel(
         st.caption(
             "只用 as-of 日及之前 K 線；**+20/40/60 日**同 **60 日內最高** 係事後驗證。"
             " 用上面 W/D/RS 勾選做篩選條件。跑完會載入 **📄 報告** 頁。"
+            " **代號／日期會記喺 `.local/ui_prefs.json`**，換股唔使重填。"
         )
+        for _bk in (
+            "fs_bt_sym",
+            "fs_bt_date",
+            "fs_scan_start",
+            "fs_scan_end",
+            "fs_bt_pass_mode",
+            "fs_csv_bt_only_pass",
+        ):
+            ensure_ui_pref(_bk)
         if err := st.session_state.get("last_error"):
             st.warning(err)
-        if "fs_bt_sym" not in st.session_state:
-            st.session_state["fs_bt_sym"] = st.session_state.get("fs_bt_scan_sym", "")
         fs_sym = st.text_input(
             "單股代號（區間掃描）",
             placeholder="MU、STX、WOLF…",
@@ -858,7 +911,6 @@ def render_fs_backtest_panel(
         with bt_c1:
             fs_bt_date = st.date_input(
                 "單日回測",
-                value=date(2026, 1, 6),
                 max_value=date.today(),
                 key="fs_bt_date",
             )
@@ -866,7 +918,6 @@ def render_fs_backtest_panel(
             fs_bt_pass = st.selectbox(
                 "區間掃描顯示",
                 ["pass", "ab", "all"],
-                index=2,
                 format_func=lambda x: {
                     "pass": "只入選",
                     "ab": "入選 + Grade B",
@@ -883,14 +934,12 @@ def render_fs_backtest_panel(
         with sc1:
             fs_scan_end = st.date_input(
                 "結束日",
-                value=date(2025, 12, 31),
                 max_value=date.today(),
                 key="fs_scan_end",
             )
         with sc2:
             fs_scan_start = st.date_input(
                 "開始日",
-                value=date(2025, 12, 1),
                 max_value=date.today(),
                 key="fs_scan_start",
             )
@@ -1112,7 +1161,8 @@ def render_first_screen_section(
             sym_n = screener_csv_symbol_count(fs_csv_path)
             if sym_n <= 0:
                 st.session_state["last_error"] = (
-                    f"CSV 內冇有效 Symbol：{fs_csv_path.name}（請確認 Symbol 欄）"
+                    f"CSV 內冇有效 Symbol：{fs_csv_path.name}"
+                    "（請確認有 Symbol / 商品 欄）"
                 )
             else:
                 run_local_first_screen(
@@ -1250,8 +1300,16 @@ UI_PREF_KEYS: tuple[str, ...] = (
     "fs_req_counter", "fs_req_leading",
     "fs_ma_flat_bars",
     "fs_limit", "fs_csv_bt_limit", "screener_path",
+    "fs_bt_sym", "fs_bt_date", "fs_scan_start", "fs_scan_end", "fs_bt_pass_mode",
+    "fs_csv_bt_only_pass",
     "main_page",
 )
+
+UI_PREF_DATE_KEYS: frozenset[str] = frozenset({
+    "fs_bt_date",
+    "fs_scan_start",
+    "fs_scan_end",
+})
 
 MAIN_PAGE_LABELS: dict[str, str] = {
     "fs": "🌱 First Screen",
@@ -1278,8 +1336,29 @@ UI_PREF_DEFAULTS: dict[str, bool | int | str] = {
     "fs_limit": 0,
     "fs_csv_bt_limit": 50,
     "screener_path": "",
+    "fs_bt_sym": "",
+    "fs_bt_date": date.today().isoformat(),
+    "fs_scan_start": (date.today() - timedelta(days=30)).isoformat(),
+    "fs_scan_end": date.today().isoformat(),
+    "fs_bt_pass_mode": "all",
+    "fs_csv_bt_only_pass": True,
     "main_page": "fs",
 }
+
+
+def _pref_to_session_value(key: str, raw):
+    if key in UI_PREF_DATE_KEYS and isinstance(raw, str) and raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return raw
+
+
+def _session_value_to_pref(key: str, val):
+    if key in UI_PREF_DATE_KEYS and isinstance(val, date):
+        return val.isoformat()
+    return val
 
 
 def load_ui_prefs() -> dict:
@@ -1300,7 +1379,8 @@ def ensure_ui_pref(key: str) -> None:
     """Load disk prefs into session_state before widgets (survives F5)."""
     if key not in st.session_state:
         disk = load_ui_prefs()
-        st.session_state[key] = disk.get(key, UI_PREF_DEFAULTS.get(key, False))
+        raw = disk.get(key, UI_PREF_DEFAULTS.get(key, False))
+        st.session_state[key] = _pref_to_session_value(key, raw)
 
 
 def ensure_all_ui_prefs() -> None:
@@ -1312,7 +1392,7 @@ def persist_ui_prefs() -> None:
     prefs = load_ui_prefs()
     for key in UI_PREF_KEYS:
         if key in st.session_state:
-            prefs[key] = st.session_state[key]
+            prefs[key] = _session_value_to_pref(key, st.session_state[key])
     save_ui_prefs(prefs)
 
 
@@ -1345,7 +1425,8 @@ def tv_status_badge(cloud_mode: bool) -> tuple[bool, str, str]:
             sym = state.get("symbol") or "?"
             tf = state.get("resolution") or "?"
             return True, sym, tf
-        return False, "", ""
+        msg = st.session_state.get("_tv_auto_connect_msg", "TV 未連線（CDP 9222）")
+        return False, "", msg
     except Exception as e:
         return False, "", str(e)
 
@@ -1971,7 +2052,7 @@ def render_status_row(connected: bool, chart_sym: str, chart_tf: str) -> None:
         if connected:
             st.success("✅ TV 已連線 (CDP 9222)")
         else:
-            st.warning("⚠️ TV 未連線 — 撳「開 TradingView」")
+            st.warning(f"⚠️ {chart_tf or 'TV 未連線'}")
     with col_b:
         if connected:
             st.metric("Chart", chart_sym)
@@ -2148,16 +2229,20 @@ def render_other_local_tools(
     )
     st.divider()
     st.subheader("📺 第一步 · 開 TradingView")
-    st.caption("關閉 TradingView 後撳掣，等 CDP ready（約 5–10 秒）再分析。")
+    st.caption("開 UI 時會自動 launch TV + 等 CDP；失敗可再撳下面掣重試。")
     if st.button(
         "📺 開 TradingView (CDP 9222)",
         use_container_width=True,
         key=f"{key_prefix}_launch_tv",
     ):
-        ok, msg = launch_tradingview_debug()
+        st.session_state.pop("_tv_auto_connect_done", None)
+        with st.spinner("正在連接 TradingView…"):
+            ok, msg = ensure_cdp_connected()
         append_logs([msg])
         if ok:
+            st.session_state["_tv_auto_connect_msg"] = msg
             st.toast(msg, icon="📺")
+            st.rerun()
         else:
             st.session_state["last_error"] = msg
 
@@ -2462,6 +2547,8 @@ def main() -> None:
 
 def _main_body() -> None:
     cloud_mode = detect_cloud_mode()
+    if not cloud_mode:
+        auto_connect_tv_if_needed()
     connected, chart_sym, chart_tf_or_err = tv_status_badge(cloud_mode)
 
     if cloud_mode:

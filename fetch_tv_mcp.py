@@ -63,13 +63,67 @@ def get_csv_dir(*, cloud: bool | None = None) -> Path:
     return CSV_DIR
 
 
+def _cdp_port() -> int:
+    return int(os.environ.get("TV_CDP_PORT", "9222"))
+
+
+def _cdp_http_ready(*, timeout: float = 1.0) -> bool:
+    """Fast check: is Chrome CDP listening on localhost?"""
+    import urllib.error
+    import urllib.request
+
+    port = _cdp_port()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version",
+            timeout=timeout,
+        ) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
 def cdp_available() -> bool:
     if is_cloud_environment():
+        return False
+    if not _cdp_http_ready(timeout=0.8):
         return False
     try:
         return bool(check_cdp().get("cdp_connected"))
     except Exception:
         return False
+
+
+def ensure_cdp_connected(
+    *,
+    auto_launch: bool = True,
+    wait_seconds: float = 90.0,
+    poll_interval: float = 2.0,
+) -> tuple[bool, str]:
+    """Connect TV CDP — launch TradingView if needed and wait until ready."""
+    if is_cloud_environment():
+        return False, "Cloud 模式唔支援本機 TradingView"
+
+    if cdp_available():
+        return True, "TV 已連線（CDP 9222）"
+
+    if not auto_launch:
+        return False, "TV 未連線（CDP 9222）"
+
+    ok, launch_msg = launch_tradingview_debug()
+    if not ok:
+        return False, launch_msg
+
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if cdp_available():
+            return True, "TV 已自動連線（CDP 9222）"
+        time.sleep(poll_interval)
+
+    return False, (
+        f"已啟動 TradingView，但 {wait_seconds:.0f}s 內 CDP 未 ready。"
+        " 等 TV 完全開啟後 F5，或去「其他工具」撳「開 TradingView」。"
+    )
 
 
 @dataclass
@@ -86,18 +140,24 @@ class PipelineResult:
     error: str = ""
 
 
-def tv_cmd(*args: str) -> dict:
+def tv_cmd(*args: str, timeout: float = 30.0) -> dict:
     if not NODE.exists():
         raise RuntimeError(f"Node not found: {NODE}")
     if not TV_CLI.exists():
         raise RuntimeError(f"tradingview-mcp CLI not found: {TV_CLI}")
-    proc = subprocess.run(
-        [str(NODE), str(TV_CLI), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env={**os.environ, "TV_CDP_PORT": os.environ.get("TV_CDP_PORT", "9222")},
-    )
+    try:
+        proc = subprocess.run(
+            [str(NODE), str(TV_CLI), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            env={**os.environ, "TV_CDP_PORT": os.environ.get("TV_CDP_PORT", "9222")},
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"tv {' '.join(args)} timed out after {timeout}s (TV Desktop / CDP 9222 未就緒？)"
+        ) from e
     if proc.returncode == 2:
         raise RuntimeError(
             "Cannot connect to TradingView CDP on port 9222. "
@@ -113,7 +173,10 @@ def tv_cmd(*args: str) -> dict:
 
 
 def check_cdp() -> dict:
-    return tv_cmd("status")
+    try:
+        return tv_cmd("status", timeout=1.0)
+    except RuntimeError:
+        return {"cdp_connected": False}
 
 
 def get_chart_state() -> dict:

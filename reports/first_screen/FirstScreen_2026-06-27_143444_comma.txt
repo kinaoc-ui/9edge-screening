@@ -1,0 +1,134 @@
+### Commercial services — Miscellaneous commercial services
+
+NYSE:XYZ
+
+### Consumer durables — Motor vehicles
+
+NYSE:FSS
+
+### Consumer non-durables — Beverages: non-alcoholic
+
+NASDAQ:MNST
+
+### Consumer services — Hotels/Resorts/Cruise lines
+
+NYSE:VIK
+
+### Consumer services — Other consumer services
+
+NYSE:VVV
+
+### Distribution services — Food distributors
+
+NASDAQ:CHEF
+
+### Electronic technology — Aerospace & defense
+
+NYSE:AIR
+NASDAQ:ATRO
+
+### Finance — Finance/Rental/Leasing
+
+NASDAQ:CACC
+NYSE:ENVA
+
+### Finance — Investment managers
+
+NYSE:BEN
+NYSE:UBS
+
+### Finance — Major banks
+
+NYSE:ASB
+NASDAQ:ONB
+NASDAQ:UMBF
+
+### Finance — Multi-line insurance
+
+NASDAQ:CINF
+NYSE:GL
+
+### Finance — Real estate investment trusts
+
+NYSE:IRM
+NYSE:APLE
+NYSE:PK
+NYSE:ESS
+NASDAQ:FRMI
+NYSE:IRT
+NYSE:PEB
+
+### Finance — Regional banks
+
+NASDAQ:BPOP
+
+### Health technology — Biotechnology
+
+NASDAQ:APGE
+NASDAQ:IMVT
+NASDAQ:NRIX
+NASDAQ:ABCL
+NASDAQ:DNLI
+NASDAQ:KRYS
+NASDAQ:MBX
+
+### Health technology — Medical specialties
+
+NASDAQ:AXGN
+
+### Health technology — Pharmaceuticals: major
+
+NASDAQ:LGND
+NASDAQ:ALKS
+NASDAQ:RPRX
+
+### Industrial services — Engineering & construction
+
+NASDAQ:VSEC
+
+### Industrial services — Oilfield services/Equipment
+
+NYSE:KGS
+NASDAQ:NESR
+
+### Non-energy minerals — Construction materials
+
+NYSE:ACA
+
+### Process industries — Containers/Packaging
+
+NYSE:SW
+
+### Producer manufacturing — Building products
+
+NYSE:SSD
+
+### Producer manufacturing — Industrial machinery
+
+NYSE:ZWS
+NASDAQ:ACLS
+NYSE:CARR
+NYSE:WTS
+
+### Retail trade — Drugstore chains
+
+NYSE:CVS
+
+### Retail trade — Specialty stores
+
+NYSE:DKS
+NYSE:PAG
+
+### Technology services — Internet software/Services
+
+NASDAQ:MRX
+NYSE:STUB
+
+### Technology services — Packaged software
+
+NYSE:OPLN
+
+### Transportation — Airlines
+
+NASDAQ:JBLU
+NASDAQ:ALGT

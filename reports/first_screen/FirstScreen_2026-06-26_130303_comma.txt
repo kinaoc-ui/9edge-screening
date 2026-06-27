@@ -1,0 +1,355 @@
+### Commercial services — Miscellaneous commercial services
+
+NYSE:XYZ
+NYSE:GEO
+NYSE:KLAR
+
+### Consumer durables — Motor vehicles
+
+NYSE:FSS
+
+### Consumer durables — Tools & hardware
+
+NYSE:SWK
+
+### Consumer non-durables — Apparel/Footwear
+
+NYSE:RL
+NASDAQ:CROX
+
+### Consumer non-durables — Beverages: alcoholic
+
+NYSE:BUD
+
+### Consumer non-durables — Beverages: non-alcoholic
+
+NASDAQ:KDP
+NASDAQ:MNST
+NYSE:PRMB
+
+### Consumer non-durables — Food: specialty/candy
+
+NASDAQ:COCO
+NYSE:SJM
+
+### Consumer services — Casinos/Gaming
+
+NASDAQ:CZR
+
+### Consumer services — Hotels/Resorts/Cruise lines
+
+NYSE:RCL
+NYSE:VIK
+
+### Consumer services — Movies/Entertainment
+
+NYSE:LYV
+NYSE:CNK
+NYSE:LION
+
+### Consumer services — Other consumer services
+
+NYSE:VVV
+NYSE:LTH
+
+### Consumer services — Restaurants
+
+NYSE:EAT
+NYSE:ARMK
+
+### Distribution services — Wholesale distributors
+
+NYSE:AIT
+NYSE:MSM
+NYSE:WCC
+
+### Electronic technology — Aerospace & defense
+
+NYSE:AIR
+NYSE:GE
+RYCEY
+NASDAQ:ATRO
+NYSE:HEI
+NYSE:HXL
+
+### Electronic technology — Electronic components
+
+NYSE:NVT
+NASDAQ:BELFB
+NASDAQ:TTMI
+
+### Electronic technology — Electronic equipment/Instruments
+
+NASDAQ:CGNX
+NYSE:ST
+NYSE:FTV
+NYSE:RAL
+
+### Electronic technology — Electronic production equipment
+
+NYSE:BE
+NASDAQ:FLEX
+NASDAQ:LFUS
+NASDAQ:PLXS
+
+### Electronic technology — Semiconductors
+
+NASDAQ:AMD
+NASDAQ:ALAB
+NASDAQ:DIOD
+NASDAQ:FORM
+NASDAQ:GFS
+IFNNY
+NASDAQ:INTC
+NASDAQ:POWI
+NASDAQ:SIMO
+NYSE:COHR
+
+### Finance — Finance/Rental/Leasing
+
+NYSE:BFH
+NASDAQ:CACC
+NYSE:SYF
+NASDAQ:UPST
+NYSE:URI
+NASDAQ:WSC
+NYSE:ALLY
+NYSE:ENVA
+NYSE:STT
+
+### Finance — Investment banks/Brokers
+
+NYSE:BCS
+NYSE:BNY
+NYSE:GS
+
+### Finance — Investment managers
+
+NYSE:MS
+NASDAQ:NTRS
+NYSE:UBS
+NYSE:AMG
+NYSE:BEN
+
+### Finance — Major banks
+
+NYSE:ASB
+NYSE:C
+NYSE:KEY
+NASDAQ:ONB
+NASDAQ:UMBF
+NASDAQ:ZION
+NYSE:CFG
+NYSE:FLG
+NASDAQ:VLY
+NYSE:BMO
+NYSE:MUFG
+
+### Finance — Multi-line insurance
+
+NASDAQ:CINF
+NYSE:GL
+NYSE:UNM
+
+### Finance — Real estate investment trusts
+
+NYSE:IRM
+NYSE:PK
+NYSE:ESS
+NASDAQ:FRMI
+
+### Finance — Regional banks
+
+NYSE:BANC
+NASDAQ:BPOP
+NASDAQ:OZK
+NYSE:FHN
+NYSE:FITB
+
+### Health services — Managed health care
+
+NYSE:UNH
+NYSE:CNC
+
+### Health services — Medical/Nursing services
+
+NYSE:HIMS
+
+### Health technology — Biotechnology
+
+NASDAQ:APGE
+NASDAQ:BEAM
+NASDAQ:IMVT
+NASDAQ:NRIX
+NASDAQ:ARWR
+NASDAQ:KRYS
+NASDAQ:NTLA
+NASDAQ:CRSP
+NASDAQ:KYMR
+
+### Health technology — Medical specialties
+
+NYSE:RVTY
+NYSE:WST
+NYSE:AVTR
+NASDAQ:AXGN
+NASDAQ:LIVN
+
+### Health technology — Pharmaceuticals: major
+
+NASDAQ:ALKS
+NASDAQ:EXEL
+NASDAQ:LGND
+NASDAQ:PTGX
+NASDAQ:ROIV
+NASDAQ:TVTX
+NASDAQ:RPRX
+
+### Health technology — Pharmaceuticals: other
+
+NASDAQ:RVMD
+
+### Industrial services — Engineering & construction
+
+NYSE:ECG
+NYSE:AGX
+NASDAQ:VSEC
+NYSE:EME
+NASDAQ:IESC
+
+### Industrial services — Environmental services
+
+NASDAQ:CWST
+
+### Industrial services — Oilfield services/Equipment
+
+NYSE:KGS
+NYSE:SEI
+NASDAQ:NESR
+
+### Miscellaneous — Miscellaneous
+
+NASDAQ:HUT
+
+### Non-energy minerals — Construction materials
+
+NYSE:ACA
+
+### Non-energy minerals — Other metals/Minerals
+
+NYSE:ATI
+NYSE:CRS
+
+### Process industries — Chemicals: major diversified
+
+NYSE:DD
+NASDAQ:SOLS
+
+### Process industries — Containers/Packaging
+
+NYSE:OC
+NYSE:PKG
+NYSE:SW
+
+### Process industries — Industrial specialties
+
+NYSE:PPG
+
+### Producer manufacturing — Auto parts: OEM
+
+NASDAQ:GTX
+
+### Producer manufacturing — Building products
+
+NYSE:MAS
+NYSE:MHK
+NYSE:SSD
+
+### Producer manufacturing — Electrical products
+
+NYSE:ROK
+NYSE:ETN
+NASDAQ:POWL
+NYSE:RRX
+NYSE:GEV
+
+### Producer manufacturing — Industrial machinery
+
+NASDAQ:ACLS
+NYSE:GTES
+NYSE:LII
+NASDAQ:AAON
+NYSE:CARR
+NYSE:IEX
+NASDAQ:MIDD
+NASDAQ:MKSI
+NYSE:NPO
+NYSE:TKR
+NYSE:WTS
+
+### Producer manufacturing — Metal fabrication
+
+NYSE:VMI
+
+### Producer manufacturing — Miscellaneous manufacturing
+
+NYSE:YETI
+
+### Producer manufacturing — Trucks/Construction/Farm machinery
+
+NYSE:BWA
+NYSE:TEX
+
+### Retail trade — Drugstore chains
+
+NYSE:CVS
+
+### Retail trade — Internet retail
+
+NYSE:ETSY
+
+### Retail trade — Specialty stores
+
+NYSE:DKS
+NYSE:PAG
+NYSE:W
+
+### Technology services — Information technology services
+
+NASDAQ:RIOT
+NASDAQ:PDFS
+
+### Technology services — Internet software/Services
+
+NYSE:RBA
+NASDAQ:MMYT
+NASDAQ:MRX
+NYSE:STUB
+
+### Technology services — Packaged software
+
+NASDAQ:AFRM
+NASDAQ:CORZ
+NASDAQ:NBIS
+NASDAQ:SEZL
+NASDAQ:VRNS
+
+### Transportation — Airlines
+
+NYSE:ALK
+NYSE:DAL
+NASDAQ:JBLU
+NASDAQ:ALGT
+NYSE:CPA
+
+### Transportation — Other transportation
+
+NYSE:PFGC
+
+### Transportation — Railroads
+
+NASDAQ:CSX
+
+### Utilities — Electric utilities
+
+NYSE:ETR

@@ -1,0 +1,14 @@
+﻿# Cursor AI — 只 block 敏感 credentials（project 內其他 file 都可以讀）
+# 注意：.cursorignore 管唔到 workspace 以外（Downloads、Documents 等）
+# 改完 reload Cursor window
+
+# Secrets only — 即使 project 內都唔好俾 AI 睇
+.env
+.env.*
+**/.streamlit/secrets.toml
+**/credentials*
+**/*token*
+**/*apikey*
+**/*api_key*
+**/*password*
+**/*secret*

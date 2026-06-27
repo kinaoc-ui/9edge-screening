@@ -20,6 +20,12 @@ from backtest_9edge import parse_as_of  # noqa: E402
 
 REPORTS = ROOT / "reports" / "first_screen" / "backtest"
 
+
+def _md_table_cell(text: str) -> str:
+    """Escape chars that break markdown pipe tables."""
+    return (text or "—").replace("|", "／").replace("\n", " ").strip()
+
+
 ProgressCallback = Callable[[int, int, date], None]
 CsvProgressCallback = Callable[[int, int, str], None]
 
@@ -179,7 +185,7 @@ def scan_backtest_range(
                 fwd_40d=fwd.get("fwd_40d"),
                 fwd_60d=fwd.get("fwd_60d"),
                 peak_60d=fwd.get("peak_60d"),
-                note=(data.get("note") or "")[:180],
+                note=(data.get("note") or "")[:320],
             )
         )
         cur -= timedelta(days=1)
@@ -228,7 +234,7 @@ def backtest_csv_at_date(
                 fwd_40d=fwd.get("fwd_40d"),
                 fwd_60d=fwd.get("fwd_60d"),
                 peak_60d=fwd.get("peak_60d"),
-                note=(data.get("note") or "")[:180],
+                note=(data.get("note") or "")[:320],
             )
         )
     rows.sort(
@@ -301,7 +307,7 @@ def format_scan_md(
             f"| {r.as_of} | {'✅' if r.pass_list else '❌'} | {r.pass_tf or '—'} | "
             f"{r.w1_score}/3 | {r.d1_score}/3 | ${r.price:.2f} | "
             f"{pct(r.fwd_20d)} | {pct(r.fwd_40d)} | {pct(r.fwd_60d)} | "
-            f"{pct(r.peak_60d)} | {r.note} |"
+            f"{pct(r.peak_60d)} | {_md_table_cell(r.note)} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -341,7 +347,7 @@ def format_csv_backtest_md(
         lines.append(
             f"| **{r.symbol}** | {r.pass_tf or '—'} | {r.w1_score}/3 | {r.d1_score}/3 | "
             f"${r.price:.2f} | {pct(r.fwd_20d)} | {pct(r.fwd_40d)} | {pct(r.fwd_60d)} | "
-            f"{pct(r.peak_60d)} | {r.note} |"
+            f"{pct(r.peak_60d)} | {_md_table_cell(r.note)} |"
         )
     lines.append("")
     return "\n".join(lines)
