@@ -30,9 +30,12 @@
 
 | bat | 用途 |
 |-----|------|
-| `launch_tv_debug.bat` + `開9edge_UI.bat` | TV 拉數 + 9-edge 分析 |
+| `launch_tv_debug.bat` + `開9edge_UI.bat` / `9edge.bat` | TV 拉數 + 9-edge 分析 |
 | `跑選股.bat` | Screener CSV 批量選股（零 token） |
+| `run_first_screen.bat` | First Screen + **W1_NEAR_MA** 匯出（Task Scheduler 用呢個；同一次 job） |
 | `batch分析CSV.bat` | 已有 CSV 批量分析 |
+
+Task Scheduler 例：`run_first_screen.bat "C:\path\to\screener.csv"`（詳見 `CSV_主流程.md` §路徑 A2）。
 
 ---
 

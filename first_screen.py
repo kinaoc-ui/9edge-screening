@@ -2,15 +2,25 @@
 """
 First Screen — 獨立初篩（唔改 9-edge 評分）
 
-W1 + D1：MA 轉上 + 量價配合（股升日量>VolMA、股跌日量<VolMA）+ optional 大陽燭。
+D1-centric PASS（可選 W1 子項）+ 每次 CSV 跑完自動匯出 **W1_NEAR_MA**
+（Luk 近 MA 回檔短名單；唔係 UI 上舊「W1 圖」checkbox）。
+
+W1_NEAR_MA（喺 FS PASS 之後，用同一套 D1 OHLCV）：
+  vs_sma20 ∈ [-1.5%, +3.5%]  AND  vs_5d_high ≤ 0.5%
 
   python first_screen.py --symbol STX
   python first_screen.py --csv path/to/screener.csv
+  python first_screen.py --csv path/to/screener.csv --limit 50
+
+Windows Task Scheduler（同一次 FS job 一併寫出 W1_NEAR_MA）:
+  run_first_screen.bat "C:\\path\\to\\screener.csv"
+  或：python first_screen.py --csv "C:\\path\\to\\screener.csv"
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import shutil
 import sys
@@ -75,7 +85,16 @@ def _purge_same_day_first_screen_outputs(out_dir: Path, day: str) -> None:
 
 FS_TV_IMPORT_OPTIONS: list[tuple[str, str]] = [
     ("FirstScreen_{date}_{time}_comma.txt", "入選全部（含 Sector / Industry）"),
+    (
+        "FirstScreen_{date}_{time}_W1_NEAR_MA_comma.txt",
+        "W1_NEAR_MA 近MA回檔短名單（### Sector — Industry；唔係舊 W1 圖 checkbox）",
+    ),
 ]
+
+# Luk near-MA pullback shortlist (D1 metrics on FS PASS) — not the weekly "W1 圖" checkbox.
+W1_NEAR_MA_VS_SMA20_MIN = -1.5
+W1_NEAR_MA_VS_SMA20_MAX = 3.5
+W1_NEAR_MA_VS_5D_HIGH_MAX = 0.5
 
 MIN_BARS_D = 60
 MIN_BARS_W = 55
@@ -351,6 +370,89 @@ def build_hit_rows(results: list[dict]) -> list[dict]:
                 "w1": f"{r.get('w1_score', 0)}/3",
                 "d1": f"{r.get('d1_score', 0)}/3",
                 "note": (r.get("note") or "")[:80],
+            }
+        )
+    return rows
+
+
+def compute_d1_near_ma_metrics(bars: list[dict] | None) -> dict | None:
+    """D1 close vs SMA20 (%) and vs 5-bar high (%) from the same OHLCV FS already uses."""
+    if not bars or len(bars) < 20:
+        return None
+    closes = [float(b["close"]) for b in bars]
+    highs = [float(b["high"]) for b in bars]
+    close = closes[-1]
+    sma20_vals = tv.sma(closes, 20)
+    sma20 = float(sma20_vals[-1])
+    if sma20 <= 0 or close <= 0:
+        return None
+    high_5d = max(highs[-5:]) if len(highs) >= 5 else max(highs)
+    if high_5d <= 0:
+        return None
+    vs_sma20 = (close / sma20 - 1.0) * 100.0
+    vs_5d_high = (close / high_5d - 1.0) * 100.0
+    return {
+        "price": round(close, 4),
+        "sma20": round(sma20, 4),
+        "vs_sma20": round(vs_sma20, 2),
+        "vs_5d_high": round(vs_5d_high, 2),
+        "high_5d": round(high_5d, 4),
+    }
+
+
+def is_w1_near_ma(
+    vs_sma20: float | None,
+    vs_5d_high: float | None,
+    *,
+    vs_sma20_min: float = W1_NEAR_MA_VS_SMA20_MIN,
+    vs_sma20_max: float = W1_NEAR_MA_VS_SMA20_MAX,
+    vs_5d_high_max: float = W1_NEAR_MA_VS_5D_HIGH_MAX,
+) -> bool:
+    """W1_NEAR_MA gate: near SMA20 pullback, not chasing the 5d high."""
+    if vs_sma20 is None or vs_5d_high is None:
+        return False
+    try:
+        vs20 = float(vs_sma20)
+        vs5 = float(vs_5d_high)
+    except (TypeError, ValueError):
+        return False
+    return vs_sma20_min <= vs20 <= vs_sma20_max and vs5 <= vs_5d_high_max
+
+
+def filter_w1_near_ma(results: list[dict]) -> list[dict]:
+    """FS PASS rows that also meet W1_NEAR_MA D1 thresholds (nearest-MA first)."""
+    kept: list[dict] = []
+    for r in results:
+        if not r.get("pass"):
+            continue
+        if not is_w1_near_ma(r.get("vs_sma20"), r.get("vs_5d_high")):
+            continue
+        kept.append(r)
+    kept.sort(
+        key=lambda x: (
+            abs(float(x.get("vs_sma20") or 0.0)),
+            float(x.get("vs_5d_high") or 0.0),
+            x.get("symbol") or "",
+        )
+    )
+    return kept
+
+
+def build_w1_near_ma_rows(results: list[dict]) -> list[dict]:
+    """UI table rows for W1_NEAR_MA shortlist."""
+    rows: list[dict] = []
+    for r in filter_w1_near_ma(results):
+        sec, ind = row_sector_industry(r)
+        rows.append(
+            {
+                "symbol": r["symbol"],
+                "sector": sec,
+                "industry": ind,
+                "vs_sma20": r.get("vs_sma20"),
+                "vs_5d_high": r.get("vs_5d_high"),
+                "price": r.get("price"),
+                "as_of": r.get("as_of_date") or "",
+                "pass_tf": r.get("pass_tf") or "—",
             }
         )
     return rows
@@ -943,15 +1045,30 @@ def score_symbol(
     as_of_str = as_of.isoformat() if as_of else (
         d1_bars[-1]["date"] if d1_bars else w1_bars[-1]["date"]
     )
+    near = compute_d1_near_ma_metrics(d1_bars)
+    price = (near or {}).get("price") or d1.get("close") or w1.get("close")
 
-    return {
+    out = {
         "symbol": sym,
         "as_of_date": as_of_str,
-        "price": d1.get("close") or w1.get("close"),
+        "price": price,
         "w1": w1,
         "d1": d1,
         **combo,
     }
+    if near:
+        out["sma20"] = near["sma20"]
+        out["vs_sma20"] = near["vs_sma20"]
+        out["vs_5d_high"] = near["vs_5d_high"]
+        out["high_5d"] = near["high_5d"]
+        out["w1_near_ma"] = is_w1_near_ma(near["vs_sma20"], near["vs_5d_high"]) and bool(
+            out.get("pass")
+        )
+    else:
+        out["vs_sma20"] = None
+        out["vs_5d_high"] = None
+        out["w1_near_ma"] = False
+    return out
 
 
 def format_sub_items_table(rows: list[dict]) -> list[str]:
@@ -1143,12 +1260,13 @@ def format_batch_summary(
 ) -> str:
     today = date.today().isoformat()
     hits = [r for r in results if r.get("pass")]
+    w1_near = filter_w1_near_ma(results)
     b_list = [r for r in results if r.get("grade") == "B"]
     csv_total = total_symbols or (len(results) + skipped)
     when = run_label or today
 
     lines = [
-        f"# First Screen 初篩（W1 + D1）— {when}",
+        f"# First Screen 初篩（D1-centric）— {when}",
         "",
         f"**來源**：{source_name}",
         "",
@@ -1158,10 +1276,15 @@ def format_batch_summary(
         f"| **已分析** | {len(results)} |",
         f"| **跳過** | {skipped} |",
         f"| **入選** | {len(hits)} |",
+        f"| **W1_NEAR_MA** | {len(w1_near)} |",
         "",
         f"> **入選條件**：{(filters.summary() if filters else 'W 或 D 任一中晒 3/3')}",
         "",
-        "> W1（近 12 週）+ D1（近 20 日）量價初篩；勾選嘅 optional 條件必須一齊過。",
+        "> D1（近 20 日）為主 + 可選 W1 子項；勾選嘅 optional 條件必須一齊過。",
+        "",
+        "> **W1_NEAR_MA**（Luk 近 MA 回檔短名單；**唔係**舊「W1 圖」checkbox）："
+        f" FS PASS 且 `vs_sma20 ∈ [{W1_NEAR_MA_VS_SMA20_MIN}, +{W1_NEAR_MA_VS_SMA20_MAX}]`"
+        f" 且 `vs_5d_high ≤ {W1_NEAR_MA_VS_5D_HIGH_MAX}`（D1 OHLCV）。",
         "",
     ]
     csv_diff = compare_screener_csv_universe(source_csv) if source_csv else None
@@ -1182,10 +1305,27 @@ def format_batch_summary(
         "| 類別 | 數量 |",
         "|------|------|",
         f"| **入選（W 或 D 3/3）** | {len(hits)} |",
+        f"| **W1_NEAR_MA（近 MA 回檔）** | {len(w1_near)} |",
         f"| **W1+D1 齊過（A+）** | {len([r for r in hits if r.get('pass_tf') == 'W1+D1'])} |",
         f"| **Grade B（接近，未入選）** | {len(b_list)} |",
         "",
     ]
+
+    if w1_near:
+        lines += [
+            "## 🎯 W1_NEAR_MA（近 MA 回檔短名單）",
+            "",
+            "| Symbol | Sector | Industry | vs SMA20 | vs 5d high | 價 | As-of |",
+            "|--------|--------|----------|--------:|-----------:|---:|-------|",
+        ]
+        for r in w1_near:
+            sec, ind = row_sector_industry(r)
+            lines.append(
+                f"| **{r['symbol']}** | {sec} | {ind} | "
+                f"{r.get('vs_sma20', '—')}% | {r.get('vs_5d_high', '—')}% | "
+                f"${r.get('price', '—')} | {r.get('as_of_date', '—')} |"
+            )
+        lines.append("")
 
     if hits:
         lines += [
@@ -1297,16 +1437,112 @@ def export_tv_watchlists(
     return comma_path.parent
 
 
+@dataclass
+class W1NearMaExport:
+    count: int = 0
+    symbols: list[str] = field(default_factory=list)
+    rows: list[dict] = field(default_factory=list)
+    comma_path: Path | None = None
+    symbols_path: Path | None = None
+    csv_path: Path | None = None
+
+
+def export_w1_near_ma(
+    results: list[dict],
+    meta: dict[str, dict],
+    *,
+    out_dir: Path,
+    run_day: str,
+    run_time: str,
+    tv_cache: dict[str, str] | None = None,
+) -> W1NearMaExport:
+    """Write W1_NEAR_MA TV ### Sector—Industry list + flat symbols + CSV.
+
+    Filenames (under reports/first_screen/):
+      FirstScreen_{day}_{time}_W1_NEAR_MA_comma.txt
+      FirstScreen_{day}_{time}_W1_NEAR_MA_symbols.txt
+      FirstScreen_{day}_{time}_W1_NEAR_MA.csv
+    """
+    import importlib
+    importlib.reload(screener)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"FirstScreen_{run_day}_{run_time}_W1_NEAR_MA"
+    comma_path = out_dir / f"{stem}_comma.txt"
+    symbols_path = out_dir / f"{stem}_symbols.txt"
+    csv_path = out_dir / f"{stem}.csv"
+
+    kept = filter_w1_near_ma(results)
+    if not kept:
+        return W1NearMaExport()
+
+    cache = tv_cache if tv_cache is not None else {}
+    if not cache:
+        screener.prefetch_tv_exchanges([r["symbol"] for r in kept], meta, cache)
+
+    tv_rows: list[dict] = []
+    csv_rows: list[dict] = []
+    for r in kept:
+        row = enrich_fs_row(r, meta, cache)
+        # Prefer nearer-to-MA within each Sector—Industry block.
+        vs20 = float(r.get("vs_sma20") or 0.0)
+        row["score"] = int(round(10000 - abs(vs20) * 100))
+        tv_rows.append(row)
+        sec, ind = row_sector_industry(r)
+        csv_rows.append(
+            {
+                "symbol": r["symbol"],
+                "sector": sec,
+                "industry": ind,
+                "vs_sma20": r.get("vs_sma20"),
+                "vs_5d_high": r.get("vs_5d_high"),
+                "as_of": r.get("as_of_date") or "",
+            }
+        )
+
+    screener.write_tv_import_txt(tv_rows, comma_path, use_tv_ticker=True)
+    symbols_path.write_text(
+        "\n".join(r["symbol"] for r in kept) + "\n",
+        encoding="utf-8",
+    )
+    with csv_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["symbol", "sector", "industry", "vs_sma20", "vs_5d_high", "as_of"],
+        )
+        writer.writeheader()
+        writer.writerows(csv_rows)
+
+    return W1NearMaExport(
+        count=len(kept),
+        symbols=[r["symbol"] for r in kept],
+        rows=csv_rows,
+        comma_path=comma_path,
+        symbols_path=symbols_path,
+        csv_path=csv_path,
+    )
+
+
 def list_fs_comma_exports() -> list[Path]:
-    """Newest-first First Screen comma.txt files (flat under reports/first_screen)."""
+    """Newest-first First Screen full-PASS comma.txt files (excludes W1_NEAR_MA)."""
     if not REPORTS.is_dir():
         return []
     files = [
         p for p in REPORTS.glob("FirstScreen_*_*_comma.txt")
-        if p.is_file()
+        if p.is_file() and "_W1_NEAR_MA_" not in p.name
     ]
     legacy = [p for p in REPORTS.glob("FirstScreen_*/FirstScreen_*_comma.txt") if p.is_file()]
     return sorted({*files, *legacy}, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def list_w1_near_ma_exports() -> list[Path]:
+    """Newest-first W1_NEAR_MA ### Sector—Industry TV import files."""
+    if not REPORTS.is_dir():
+        return []
+    files = [
+        p for p in REPORTS.glob("FirstScreen_*_*_W1_NEAR_MA_comma.txt")
+        if p.is_file()
+    ]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def list_export_dirs() -> list[Path]:
@@ -1329,7 +1565,11 @@ def list_export_dirs() -> list[Path]:
 
 def tv_import_options_for_run(day: str, run_time: str) -> list[tuple[str, str]]:
     return [
-        (f"FirstScreen_{day}_{run_time}_comma.txt", "入選全部（含 Sector / Industry）"),
+        (
+            fname.replace("{date}", day).replace("{time}", run_time),
+            label.replace("{date}", day),
+        )
+        for fname, label in FS_TV_IMPORT_OPTIONS
     ]
 
 
@@ -1382,6 +1622,12 @@ class FirstScreenRunResult:
     run_time: str = ""
     summary_md: str = ""
     filters: FirstScreenFilters | None = None
+    w1_near_ma_count: int = 0
+    w1_near_ma_symbols: list[str] = field(default_factory=list)
+    w1_near_ma_rows: list[dict] = field(default_factory=list)
+    w1_near_ma_path: Path | None = None
+    w1_near_ma_csv_path: Path | None = None
+    w1_near_ma_symbols_path: Path | None = None
 
 
 def run_screen(
@@ -1480,11 +1726,26 @@ def run_screen(
     summary_path.write_text(summary_md, encoding="utf-8")
 
     export_dir = export_tv_watchlists(results, meta, comma_path)
+    w1_export = export_w1_near_ma(
+        results,
+        meta,
+        out_dir=out_dir,
+        run_day=run_day,
+        run_time=run_time,
+    )
     watchlist_name = f"FirstScreen_{run_day}_{run_time}"
 
     hits = [r["symbol"] for r in results if r.get("pass")]
     hit_rows = build_hit_rows(results)
     logs.append(f"TV import: {comma_path.name}" if comma_path.is_file() else "TV import: (0 hits)")
+    if w1_export.comma_path and w1_export.comma_path.is_file():
+        logs.append(
+            f"W1_NEAR_MA: {w1_export.count} → {w1_export.comma_path.name}"
+            f" (+ {w1_export.csv_path.name if w1_export.csv_path else 'csv'}, "
+            f"{w1_export.symbols_path.name if w1_export.symbols_path else 'symbols'})"
+        )
+    else:
+        logs.append("W1_NEAR_MA: 0 (no PASS names near SMA20)")
     logs.append(f"Done: {len(results)} analyzed, {len(hits)} on list, {skipped} skipped")
     logs.append(f"Summary: {summary_path}")
 
@@ -1509,15 +1770,40 @@ def run_screen(
         run_time=run_time,
         summary_md=summary_md,
         filters=filters,
+        w1_near_ma_count=w1_export.count,
+        w1_near_ma_symbols=w1_export.symbols,
+        w1_near_ma_rows=w1_export.rows,
+        w1_near_ma_path=w1_export.comma_path,
+        w1_near_ma_csv_path=w1_export.csv_path,
+        w1_near_ma_symbols_path=w1_export.symbols_path,
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="First Screen — W1+D1 MA 轉上 + 量價初篩")
+    parser = argparse.ArgumentParser(
+        description=(
+            "First Screen — D1-centric MA/量價初篩；每次 CSV 跑完自動匯出 W1_NEAR_MA "
+            "（近 MA 回檔短名單，唔係舊 W1 圖 checkbox）"
+        ),
+        epilog=(
+            "Task Scheduler / batch 例：\n"
+            "  run_first_screen.bat \"C:\\path\\to\\screener.csv\"\n"
+            "  python first_screen.py --csv \"C:\\path\\to\\screener.csv\"\n"
+            "輸出：reports/first_screen/FirstScreen_*_comma.txt 同 "
+            "FirstScreen_*_W1_NEAR_MA_comma.txt（### Sector — Industry）"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--symbol", "-s", help="單一 symbol")
     parser.add_argument("--csv", "-c", type=Path, help="TradingView screener CSV")
     parser.add_argument("--limit", "-n", type=int, default=0, help="試跑上限（0=全部）")
     parser.add_argument("--out", "-o", type=Path, help="單股報告輸出路徑")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.12,
+        help="每隻間隔秒數（scheduled 大批量可維持預設；試跑可用 0）",
+    )
     args = parser.parse_args()
 
     if args.symbol:
@@ -1534,10 +1820,17 @@ def main() -> None:
         return
 
     if args.csv:
-        result = run_screen(args.csv, limit=args.limit)
+        result = run_screen(args.csv, limit=args.limit, delay=args.delay)
         if not result.ok:
             raise SystemExit(result.error)
         sys.stdout.buffer.write((result.summary_md + "\n").encode("utf-8"))
+        if result.w1_near_ma_path:
+            print(
+                f"W1_NEAR_MA ({result.w1_near_ma_count}): {result.w1_near_ma_path}",
+                file=sys.stderr,
+            )
+        else:
+            print("W1_NEAR_MA (0): (none)", file=sys.stderr)
         return
 
     raise SystemExit("Use --symbol STX or --csv screener.csv")

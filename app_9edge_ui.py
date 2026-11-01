@@ -382,24 +382,38 @@ def render_fs_tv_import_block(
             picked = latest[0].parent
         else:
             comma_name = f"FirstScreen_{date.today().isoformat()}_000000_comma.txt"
-    day = comma_name.removeprefix("FirstScreen_").split("_")[0] if comma_name.startswith("FirstScreen_") else date.today().isoformat()
+    day = date.today().isoformat()
+    run_time = "000000"
+    if comma_name.startswith("FirstScreen_"):
+        # FirstScreen_YYYY-MM-DD_HHMMSS[_W1_NEAR_MA]_comma.txt
+        rest = comma_name.removeprefix("FirstScreen_").removesuffix("_comma.txt")
+        parts = rest.split("_")
+        if len(parts) >= 2:
+            day, run_time = parts[0], parts[1]
+    file_options = fs.tv_import_options_for_run(day, run_time)
+    # Keep only files that exist; fall back to date lookup if this run stamp is stale.
+    existing = [f for f, _ in file_options if (picked / f).is_file()]
+    if not existing:
+        file_options = fs.tv_import_options_for_date(day)
     render_tv_watchlist_import(
         key_prefix=key_prefix,
         default_export_dir=picked,
         export_dirs=dirs,
-        file_options=fs.tv_import_options_for_date(day),
+        file_options=file_options,
         default_list_file=comma_name,
         title="**📥 First Screen → TV Watchlist**",
         watchlist_hint=(
             f"建議喺 TV **新建 watchlist**（例如 `{comma_name.removesuffix('_comma.txt')}`），"
             f"再 Import **`{comma_name}`**（內有 ### Sector — Industry 分組）。"
+            " 清單可揀 **W1_NEAR_MA**（近 MA 回檔；唔係舊 W1 圖 checkbox）或入選全部。"
         ),
     )
 
 
 def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> None:
-    """First Screen 完成後：入選數、開資料夾、TV import。"""
+    """First Screen 完成後：入選數、W1_NEAR_MA、開資料夾、TV import。"""
     csv_total = result.total_symbols or (result.analyzed + result.skipped)
+    w1_n = int(getattr(result, "w1_near_ma_count", 0) or 0)
     if getattr(result, "warning", ""):
         st.warning(result.warning)
     elif result.analyzed == 0 and csv_total > 0:
@@ -415,13 +429,14 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
 
     st.success(
         f"✅ First Screen 完成 — 入選 **{result.hit_count}** 隻"
+        f"；**W1_NEAR_MA {w1_n}** 隻"
         f"（已分析 {result.analyzed} / CSV {csv_total}"
         + (f"，跳過 {result.skipped}" if result.skipped else "")
         + "）"
     )
     if getattr(result, "filters", None):
         st.caption(f"**本次條件**：{result.filters.summary()}")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric("CSV 總數", csv_total)
     with c2:
@@ -430,6 +445,8 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
         st.metric("跳過", result.skipped)
     with c4:
         st.metric("入選", result.hit_count)
+    with c5:
+        st.metric("W1_NEAR_MA", w1_n)
 
     if result.watchlist_name and result.dated_hits_path:
         st.caption(
@@ -438,6 +455,64 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
         )
     if getattr(result, "filters", None):
         st.caption(f"入選條件：**{result.filters.summary()}**")
+
+    w1_path = getattr(result, "w1_near_ma_path", None)
+    w1_csv = getattr(result, "w1_near_ma_csv_path", None)
+    w1_rows = getattr(result, "w1_near_ma_rows", None) or []
+    st.markdown("**🎯 W1_NEAR_MA（Luk 近 MA 回檔短名單）**")
+    st.caption(
+        "FS PASS 後篩 `vs_sma20 ∈ [-1.5%, +3.5%]` 且 `vs_5d_high ≤ 0.5%`（D1 OHLCV）。"
+        " **唔係**上面「W1 圖」checkbox／舊 weekly tick-W 流程。"
+    )
+    if w1_n and w1_path and Path(w1_path).is_file():
+        st.info(f"W1_NEAR_MA **{w1_n}** 隻 → `{Path(w1_path).name}`（### Sector — Industry）")
+        if w1_rows:
+            st.dataframe(
+                w1_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "symbol": st.column_config.TextColumn("Symbol", width="small"),
+                    "sector": st.column_config.TextColumn("Sector", width="medium"),
+                    "industry": st.column_config.TextColumn("Industry", width="large"),
+                    "vs_sma20": st.column_config.NumberColumn("vs SMA20 %", format="%.2f"),
+                    "vs_5d_high": st.column_config.NumberColumn("vs 5d high %", format="%.2f"),
+                    "as_of": st.column_config.TextColumn("As-of", width="small"),
+                },
+            )
+        dw1, dw2, dw3 = st.columns(3)
+        with dw1:
+            st.download_button(
+                f"⬇️ W1_NEAR_MA TV list（{w1_n}）",
+                data=Path(w1_path).read_text(encoding="utf-8"),
+                file_name=Path(w1_path).name,
+                mime="text/plain",
+                use_container_width=True,
+                key=f"{key_prefix}_w1_dl_txt",
+            )
+        with dw2:
+            if w1_csv and Path(w1_csv).is_file():
+                st.download_button(
+                    "⬇️ W1_NEAR_MA CSV",
+                    data=Path(w1_csv).read_text(encoding="utf-8"),
+                    file_name=Path(w1_csv).name,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"{key_prefix}_w1_dl_csv",
+                )
+        with dw3:
+            if st.button(
+                "📄 開 W1_NEAR_MA 清單",
+                use_container_width=True,
+                key=f"{key_prefix}_w1_open",
+            ):
+                ok, msg = open_path_in_explorer(Path(w1_path))
+                if ok:
+                    st.toast(msg, icon="📂")
+                else:
+                    st.session_state["last_error"] = msg
+    else:
+        st.caption("今次冇 W1_NEAR_MA 短名單（PASS 入面冇隻近 SMA20）。")
 
     hit_rows = getattr(result, "hit_rows", None) or []
     if hit_rows:
@@ -501,10 +576,16 @@ def render_first_screen_results(result, *, key_prefix: str = "fs_result") -> Non
         st.caption(f"匯出：`{result.export_dir}`")
 
     st.divider()
+    # Prefer W1_NEAR_MA as the default TV import pick when present.
+    default_tv = (
+        Path(w1_path)
+        if w1_n and w1_path and Path(w1_path).is_file()
+        else result.dated_hits_path
+    )
     render_fs_tv_import_block(
         key_prefix=f"{key_prefix}_tv",
         default_dir=result.export_dir,
-        default_comma=result.dated_hits_path,
+        default_comma=default_tv,
     )
 
 
@@ -1036,11 +1117,13 @@ def render_first_screen_section(
             "報告喺 **📄 報告** 頁（可 Download）。TV MCP 匯入要本機。"
         )
     st.caption(
-        "W/D 子項可單獨 tick；都冇勾 = **W 或 D 3/3**。"
+        "D1-centric 初篩：W/D 子項可單獨 tick；都冇勾 = **W 或 D 3/3**。"
+        " 每次跑完會自動匯出 **W1_NEAR_MA**（近 MA 回檔短名單；"
+        "**唔係**下方「W1 圖」checkbox）。"
         " **設定自動儲存**（`.local/ui_prefs.json`），F5 唔使重 tick。"
     )
 
-    st.markdown("**W1 圖**")
+    st.markdown("**W1 圖**（optional 週線子項 — 唔係 W1_NEAR_MA 短名單）")
     fw0, fw1, fw2, fw3, fw4 = st.columns(5)
     with fw0:
         st.checkbox("W1", key="fs_w_en")
@@ -1274,8 +1357,9 @@ def run_local_first_screen(
         symbol="FIRST_SCREEN",
     )
     flat_n = int(filters.ma_flat_min_bars) if filters else 1
+    w1_n = int(getattr(result, "w1_near_ma_count", 0) or 0)
     toast = (
-        f"✅ 初篩通過 {result.hit_count} 隻"
+        f"✅ 初篩通過 {result.hit_count} 隻 · W1_NEAR_MA {w1_n}"
         f"（已分析 {result.analyzed}/{result.total_symbols}，MA轉平={flat_n}bar）"
     )
     st.toast(toast, icon="✅")

@@ -27,6 +27,44 @@ python screen_screener_csv.py "你的.csv" --limit 10   REM 試跑 10 隻
 
 ---
 
+## 路徑 A2 — First Screen + W1_NEAR_MA（D1 初篩短名單）
+
+TradingView Screener CSV → First Screen PASS → 自動再篩 **W1_NEAR_MA**（Luk 近 MA 回檔；**唔係**舊「W1 圖」checkbox）。
+
+規則（FS PASS 之後，用同一套 D1 OHLCV）：
+- `vs_sma20 ∈ [-1.5%, +3.5%]`
+- `vs_5d_high ≤ 0.5%`
+
+### 本機 / UI
+- Streamlit：**🌱 First Screen** → 跑完可 Download `*_W1_NEAR_MA_comma.txt`
+- CLI：
+```bat
+python first_screen.py --csv "C:\path\to\screener.csv"
+run_first_screen.bat "C:\path\to\screener.csv"
+```
+
+輸出（`reports/first_screen/`）：
+- `FirstScreen_*_comma.txt` — 入選全部（`### Sector — Industry`）
+- `FirstScreen_*_W1_NEAR_MA_comma.txt` — 近 MA 短名單（同格式）
+- `FirstScreen_*_W1_NEAR_MA.csv` — symbol, sector, industry, vs_sma20, vs_5d_high, as_of
+- `FirstScreen_*_W1_NEAR_MA_symbols.txt` — flat symbols
+
+### Windows Task Scheduler（同一個 FS job，唔使第二個排程）
+
+| 欄位 | 值 |
+|------|-----|
+| Program/script | `C:\path\to\repo\run_first_screen.bat` |
+| Add arguments | `"C:\path\to\screener.csv"` |
+| Start in | `C:\path\to\repo` |
+
+等同命令列：
+```bat
+python first_screen.py --csv "C:\path\to\screener.csv"
+```
+無 CSV 參數時，bat 會用 `screener\` 資料夾最新 `new*.csv`。
+
+---
+
 ## 路徑 B — 每隻股 export chart CSV（更準）
 
 1. TradingView 開 W1 -> Export chart data -> `charts/csv/ETN_W1.csv`
